@@ -39,6 +39,7 @@ mid-tick, which reads as a permanent 19.80 on a perfectly healthy server.
 | `/tickpilot top` | level 2 | Tick cost split by category |
 | `/tickpilot top entities` | level 2 | Costliest entity types, and the mods they belong to |
 | `/tickpilot top blockentities` | level 2 | Costliest block entity types |
+| `/tickpilot explain` | level 2 | All of the above in one plain-language readout, plus one recommendation |
 
 Example output:
 
@@ -125,6 +126,52 @@ rather than printing a plausible lie.
 **Chunk sending to players is not in `Network`.** It happens per player at the server level while
 `Network` is the connection tick, and folding one into the other would make the numbers
 unpredictable. It sits in `Other`.
+
+## Explaining a drop
+
+`/tickpilot explain` is the same measurements as `status` and `top`, read out in the order a person
+would ask for them, ending in **one** recommendation and an estimate of what acting on it would
+buy. It is meant for the moment when somebody says "the server is lagging" and you have thirty
+seconds to say something useful.
+
+### The rules the wording follows
+
+**One recommendation, not a list.** A list of eight things to try is a way of not having an
+opinion. If the evidence supports two, the mod says the one it can support best.
+
+**An effect estimate carries a number only when the number is an upper bound from a measurement.**
+The quantified form is always "at most X ms/tick, and only if every one of them stops ticking",
+because the cost per instance was never measured and "remove half, save half" does not follow from
+anything. Everything else says *unknown*, which AC-13 explicitly allows and which is the honest
+answer for chunk generation, redstone, network and `Other`.
+
+**MSPT and TPS are never conflated.** Below 50 ms/tick a server is already at 20 TPS, so removing
+work there buys headroom against future load and no TPS at all. The estimate says which of the two
+it is, instead of implying the more impressive one.
+
+**Missing data is stated, not filled in.** With no profiling session there is no category
+breakdown — one line saying so and a recommendation to run a session, not a plausible guess. The
+deferred-task count reads `n/a` because the scheduler does not exist yet; a `0` there would read as
+a measured empty queue.
+
+**A short uptime narrows the claim, it does not silence it.** Under a minute of measurements the
+output says what window it actually covers. It still gives the verdict: a server dying thirty
+seconds after a start really is dying, and refusing to look at it would be a worse failure than
+answering carefully.
+
+### Drops now versus drops earlier
+
+The two percentile windows are used for exactly what they were introduced for. A p99 above the
+critical threshold in the **last minute** means it is happening right now, and the recommendation
+is to profile *while it is happening*. A clean last minute next to a bad **history** p99 means it
+already stopped, and the recommendation is to wait and catch the next one rather than profile an
+idle server.
+
+That second claim is only made when the retained history is genuinely longer than a minute —
+otherwise both pairs are computed from the same samples, and calling one of them "the past" would
+be an artefact of the window rather than a finding. It also keys off the history p99 and not the
+maximum, because the slowest tick on almost any server is its own startup tick at ~120 ms; that one
+is printed with its age on its own line and does not need to become a diagnosis.
 
 ## Configuration
 

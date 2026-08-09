@@ -47,4 +47,9 @@ public enum AdaptiveMode {
 	public String configValue() {
 		return name().toUpperCase(Locale.ROOT);
 	}
+
+	/** @return the translation key used to render this mode in player-facing text */
+	public String translationKey() {
+		return "tickpilot.mode." + name().toLowerCase(Locale.ROOT);
+	}
 }
