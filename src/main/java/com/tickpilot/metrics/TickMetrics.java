@@ -41,6 +41,13 @@ public final class TickMetrics {
 	/** Enough samples for the longest window (5 min at 20 TPS). */
 	public static final int DEFAULT_CAPACITY = 6_000;
 
+	/**
+	 * How many mean tick periods may pass with no completed tick before {@link #tps(long)} starts
+	 * counting the wait against the measured rate. One period is the tick currently in flight;
+	 * the second absorbs ordinary jitter.
+	 */
+	public static final int STALL_GRACE_PERIODS = 2;
+
 	private static final double NANOS_PER_MILLI = 1_000_000.0;
 	private static final double NANOS_PER_SECOND = 1_000_000_000.0;
 
@@ -57,7 +64,6 @@ public final class TickMetrics {
 
 	private long totalTicks;
 	private long lastDurationNanos;
-	private long firstSampleEndNanos;
 
 	private long openTickStartNanos;
 	private boolean tickOpen;
@@ -122,10 +128,6 @@ public final class TickMetrics {
 		durationNanos[writeIndex] = duration;
 		endNanos[writeIndex] = nowNanos;
 		writeIndex = writeIndex + 1 == capacity ? 0 : writeIndex + 1;
-
-		if (sampleCount == 0) {
-			firstSampleEndNanos = nowNanos;
-		}
 
 		if (sampleCount < capacity) {
 			sampleCount++;
@@ -197,47 +199,71 @@ public final class TickMetrics {
 	/**
 	 * Current ticks per second, measured over the last 5 s of wall-clock time.
 	 *
-	 * <p>Derived from how many ticks actually completed in the window rather than from MSPT, so
-	 * a server that is idle-waiting between short ticks reads 20 rather than 200, and a server
-	 * that stalled for the whole window reads 0. The result is capped at {@link #TARGET_TPS}
-	 * because vanilla never ticks faster than its target rate.
+	 * <h2>How it is measured, and one way it must not be</h2>
+	 * The rate is the mean interval between recorded tick ends — {@code (n - 1)} completed tick
+	 * periods divided by the time they span — and never the sample count divided by the nominal
+	 * window length.
+	 *
+	 * <p>That second, obvious-looking formula is wrong, and wrong in a way that hides: a 5 s
+	 * window crosses 100 tick boundaries at 20 TPS, but the tick being executed right now has not
+	 * recorded its end yet, so only 99 ends fall inside it. Dividing by a fixed 5 s then yields
+	 * 19.8 for a perfectly healthy server, always, and quantises the result to steps of 0.2 TPS.
+	 * Anchoring on recorded ends instead makes the boundary irrelevant: 98 periods over 4900 ms
+	 * is exactly 20.
+	 *
+	 * <h2>Stalls</h2>
+	 * A rate built only from completed ticks cannot notice that the next one is overdue, so time
+	 * spent waiting for it is added to the measured span once it exceeds
+	 * {@link #STALL_GRACE_PERIODS} mean periods. Below that the server is merely mid-tick, which
+	 * is normal even at 45 ms MSPT and must not be reported as a slowdown. Once nothing has ticked
+	 * for the whole window the result is 0.
+	 *
+	 * <p>The value is capped at {@link #TARGET_TPS}: vanilla never ticks faster than its target
+	 * rate, so a higher number would only be measurement noise.
 	 *
 	 * <p>A reduced value is <em>not</em> by itself evidence of overload: {@code /tick rate} lowers
 	 * the target rate on purpose, which is why the status output reports the tick rate manager
-	 * state alongside this number (SPEC AC-1b).
+	 * state alongside this number (SPEC AC-1b). Nor does a healthy value prove the server is
+	 * comfortable — TPS saturates at 20 while MSPT still has 49 ms of headroom to lose, which is
+	 * exactly why SPEC §2 makes MSPT the primary metric.
 	 *
 	 * @param nowNanos current {@link System#nanoTime()}
-	 * @return ticks per second in {@code [0, 20]}, or 0 while nothing has been measured
+	 * @return ticks per second in {@code [0, 20]}, or 0 until two ticks have been measured
 	 */
 	public double tps(long nowNanos) {
-		if (sampleCount == 0) {
-			return 0.0;
-		}
-
 		long cutoff = nowNanos - WINDOW_5S_NANOS;
-		int ticksInWindow = 0;
+		int n = 0;
 
 		for (int i = 0; i < sampleCount; i++) {
 			if (endNanos[indexFromNewest(i)] <= cutoff) {
 				break;
 			}
 
-			ticksInWindow++;
+			n++;
 		}
 
-		if (ticksInWindow == 0) {
+		// One sample describes no interval, so there is nothing to derive a rate from yet.
+		if (n < 2) {
 			return 0.0;
 		}
 
-		// Before the first full window has elapsed, divide by the real uptime instead of the
-		// nominal window, otherwise a freshly started server reads a fraction of its true rate.
-		long elapsed = Math.min(WINDOW_5S_NANOS, nowNanos - firstSampleEndNanos);
+		long newest = endNanos[indexFromNewest(0)];
+		long oldest = endNanos[indexFromNewest(n - 1)];
+		long span = newest - oldest;
+		int periods = n - 1;
 
-		if (elapsed <= 0L) {
+		if (span <= 0L) {
 			return TARGET_TPS;
 		}
 
-		return Math.min(TARGET_TPS, ticksInWindow * NANOS_PER_SECOND / elapsed);
+		double meanPeriod = (double) span / periods;
+		double overdue = (nowNanos - newest) - STALL_GRACE_PERIODS * meanPeriod;
+
+		if (overdue > 0.0) {
+			return Math.min(TARGET_TPS, periods * NANOS_PER_SECOND / (span + overdue));
+		}
+
+		return Math.min(TARGET_TPS, periods * NANOS_PER_SECOND / span);
 	}
 
 	/** @return longest tick in the retained history, in milliseconds, or 0 if there are none */
@@ -319,7 +345,6 @@ public final class TickMetrics {
 		sampleCount = 0;
 		totalTicks = 0L;
 		lastDurationNanos = 0L;
-		firstSampleEndNanos = 0L;
 		openTickStartNanos = 0L;
 		tickOpen = false;
 	}
