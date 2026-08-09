@@ -37,9 +37,25 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
   lists up to eight rejected values in chat with the rest in the log, and returns failure to a
   command block when the file could not be read. An unparseable file puts the server back on
   defaults, and the message says so — nobody is left thinking their edits took effect.
-- 59 new unit tests (24 for the parser, 31 for loading and validation, 4 for applying a config to
+- 61 new unit tests (24 for the parser, 31 for loading and validation, 6 for applying a config to
   a running server), none of which launch Minecraft; the filesystem cases run against a JUnit
-  `@TempDir`. Suite total is now 112.
+  `@TempDir`. Suite total is now 114.
+
+#### Fixed during Phase 4
+
+- **Reload fed the load-level state machine a clock from a different epoch.** `reconfigure` took
+  `System.currentTimeMillis()` while every other clock value in `TickPilotServerState` — and every
+  value the tick loop passes `TickBudget.update` — comes from `System.nanoTime()`. A rebuilt budget
+  would have recorded its hold-period start about fifty-five years ahead of the tick loop's clock,
+  so `heldForMillis` stayed negative forever and the level could never drop back down after a
+  reload with changed thresholds. Found by review, not by a failing test, so `reconfigure` now
+  takes nanoseconds like its neighbours and `TickPilotServerStateTest` pins the unit down.
+
+Verified on a dedicated server (`./gradlew runServer`), all four paths: the file is created at
+`run/config/tickpilot.toml` with the FR-15 defaults; a clean reload reports success; a file with
+three bad values and one misspelled key logs exactly those four and keeps everything else; and a
+file with a syntax error logs `line 1`, runs on defaults and comes out of the run with an
+unchanged md5.
 
 #### Not implemented / deferred
 

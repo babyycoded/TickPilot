@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
  */
 class TickPilotServerStateTest {
 	private static final long START_NANOS = 1_000_000_000L;
+	private static final long NANOS_PER_MILLI = 1_000_000L;
 
 	private static TickPilotConfig config(String toml) {
 		return ConfigLoader.read(toml).config();
@@ -62,6 +63,29 @@ class TickPilotServerStateTest {
 		assertTrue(changed);
 		assertEquals(30.0, state.budget().targetMspt());
 		assertEquals(60.0, state.budget().criticalMspt());
+	}
+
+	@Test
+	void theRebuiltBudgetIsOnTheSameClockAsTheTickLoop() {
+		// TickBudget counts hold time in milliseconds, while every clock value this class is given
+		// is System.nanoTime(). Handing the budget raw nanos would put its hold clock roughly a
+		// million times ahead of the values the tick loop feeds update(), and a level would then
+		// never be allowed to drop again. Cheap to get wrong, invisible until a server is running.
+		long reloadNanos = START_NANOS + 30_000_000_000L;
+		TickPilotServerState state = new TickPilotServerState(START_NANOS,
+				config("target_mspt = 25.0\ncritical_mspt = 45.0\n"));
+
+		state.reconfigure(config("target_mspt = 30.0\ncritical_mspt = 60.0\n"), reloadNanos);
+
+		assertEquals(0L, state.budget().heldForMillis(reloadNanos / NANOS_PER_MILLI));
+		assertEquals(5_000L, state.budget().heldForMillis(reloadNanos / NANOS_PER_MILLI + 5_000L));
+	}
+
+	@Test
+	void theInitialBudgetIsOnTheSameClockToo() {
+		TickPilotServerState state = new TickPilotServerState(START_NANOS, TickPilotConfig.defaults());
+
+		assertEquals(0L, state.budget().heldForMillis(START_NANOS / NANOS_PER_MILLI));
 	}
 
 	@Test

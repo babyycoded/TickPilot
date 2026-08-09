@@ -77,7 +77,7 @@ public final class TickPilotCommand {
 			// The log keeps the full list even when chat only gets the first few.
 			TickPilot.logConfigResult(result);
 
-			boolean thresholdsChanged = state.reconfigure(result.config(), System.currentTimeMillis());
+			boolean thresholdsChanged = state.reconfigure(result.config(), System.nanoTime());
 
 			switch (result.status()) {
 				case CREATED -> source.sendSuccess(() -> Component.translatable(
