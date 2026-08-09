@@ -30,16 +30,29 @@ before implementing. Do not invent requirements that are not there.
 8. Player-critical work (chunk loading for a player, teleport, force-loaded chunks) is
    never throttled.
 
+## Mappings: Mojang Mappings (Mojmap), NOT Yarn
+
+Decided in `SPEC.md` §13 entry #1. `build.gradle` uses `mappings loom.officialMojangMappings()`.
+All class/method names in code, commit messages, and docs are **Mojang naming**
+(`ResourceLocation`, `Minecraft`, `Level`, `ServerLevel`, `MinecraftServer`, ...).
+Do not use Yarn names (`Identifier`, `MinecraftClient`, `World`) anywhere.
+
 ## API verification protocol — the #1 failure mode
 
-Minecraft/Yarn method names change between versions and my training data is not
+Minecraft method names change between versions and my training data is not
 authoritative for 1.21.1. Therefore:
 
 - **Never write a Minecraft API call from memory.** Verify each one first.
-- Verify by: `./gradlew genSources` then grep the decompiled sources, or check the
-  jar in `~/.gradle/caches/fabric-loom/`, or `https://mappings.dev` / linkie for 1.21.1.
-- If a Mixin target does not resolve against 1.21.1 mappings: **stop**, re-check
-  mappings, report it. Do not guess a similar-looking name.
+- Preferred method: unpack `mappings.tiny` from
+  `~/.gradle/caches/fabric-loom/1.21.1/.../mappings.jar` (columns `official / intermediary
+  / named`, `named` = Mojang names) and grep it — this is exactly what the project compiles
+  against. Alternative: `./gradlew genSources` then read the decompiled sources.
+  External sites like mappings.dev/linkie are Yarn-oriented and not authoritative here.
+- If a Mixin target does not resolve against these mappings: **stop**, re-check,
+  report it. Do not guess a similar-looking name.
+- Finding that a method *exists* does not mean it is a *safe Mixin target* — recursive
+  methods (e.g. entity ticking with passengers) or loop bodies (e.g. block entity ticking)
+  can cause double-counting if injected naively. Verify the call shape, not just the name.
 - If no safe hook exists for a feature: implement profiling only, add a row to the
   decision log in `SPEC.md` §13, and say so out loud. Do not fake it.
 
