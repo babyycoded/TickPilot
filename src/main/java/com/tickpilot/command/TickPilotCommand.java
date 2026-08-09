@@ -1,5 +1,6 @@
 package com.tickpilot.command;
 
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
@@ -13,6 +14,8 @@ import com.tickpilot.config.ConfigLoadResult;
 import com.tickpilot.config.ConfigLoader;
 import com.tickpilot.metrics.TickMetrics;
 import com.tickpilot.metrics.TickMetricsSnapshot;
+import com.tickpilot.profiler.TickCategory;
+import com.tickpilot.profiler.TickProfiler;
 
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 
@@ -56,7 +59,81 @@ public final class TickPilotCommand {
 						.executes(context -> status(context.getSource())))
 				.then(Commands.literal("reload")
 						.requires(source -> source.hasPermission(2))
-						.executes(context -> reload(context.getSource()))));
+						.executes(context -> reload(context.getSource())))
+				.then(Commands.literal("top")
+						.requires(source -> source.hasPermission(2))
+						.executes(context -> top(context.getSource()))));
+	}
+
+	/**
+	 * Prints the SPEC FR-2 category breakdown (SPEC FR-12 {@code /tickpilot top}).
+	 *
+	 * <p>A category with no injection point prints {@code n/a}, never {@code 0.00} — AC-2 is
+	 * explicit that an unmeasured category must not look like a measured-and-idle one.
+	 */
+	private static int top(CommandSourceStack source) {
+		try {
+			TickPilotServerState state = ServerStateHolder.get(source.getServer());
+
+			if (state == null || state.isDisabled()) {
+				source.sendFailure(Component.translatable("command.tickpilot.status.unavailable"));
+				return 0;
+			}
+
+			TickProfiler profiler = state.profiler();
+
+			if (profiler.sessionTicks() == 0L) {
+				source.sendSuccess(() -> Component.translatable("command.tickpilot.top.no_session"), false);
+				return 1;
+			}
+
+			long ticks = profiler.sessionTicks();
+			double totalMspt = toMsptPerTick(profiler.sessionNanos(TickCategory.TOTAL), ticks);
+
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.top.header",
+					ticks, format(totalMspt)), false);
+
+			for (TickCategory category : TickCategory.all()) {
+				if (category == TickCategory.TOTAL) {
+					continue;
+				}
+
+				Component name = Component.translatable(category.translationKey());
+
+				// OTHER is derived from TOTAL, so it is always meaningful; the rest need a hook.
+				if (category != TickCategory.OTHER && !profiler.isAvailable(category)) {
+					source.sendSuccess(() -> Component.translatable("command.tickpilot.top.row_unavailable",
+							name, Component.translatable("tickpilot.value.unavailable")
+									.withStyle(ChatFormatting.GRAY)), false);
+					continue;
+				}
+
+				double mspt = toMsptPerTick(profiler.sessionNanos(category), ticks);
+				double share = totalMspt > 0.0 ? mspt / totalMspt * 100.0 : 0.0;
+
+				source.sendSuccess(() -> Component.translatable("command.tickpilot.top.row",
+						name, format(mspt), format(share)), false);
+			}
+
+			// A self-check counter that is not zero means the numbers above are wrong. Say so
+			// rather than let them be read as fact.
+			if (!profiler.isConsistent()) {
+				source.sendSuccess(() -> Component.translatable("command.tickpilot.top.inconsistent",
+						profiler.droppedFrames(), profiler.unbalancedEnds(),
+						profiler.abandonedFrames(), profiler.overrunTicks())
+						.withStyle(ChatFormatting.RED), false);
+			}
+
+			return 1;
+		} catch (Throwable t) {
+			TickPilot.LOGGER.error("/tickpilot top failed", t);
+			source.sendFailure(Component.translatable("command.tickpilot.error"));
+			return 0;
+		}
+	}
+
+	private static double toMsptPerTick(long nanos, long ticks) {
+		return ticks <= 0L ? 0.0 : (double) nanos / ticks / 1_000_000.0;
 	}
 
 	/**

@@ -5,6 +5,88 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
 
 ## Unreleased
 
+### Phase 5 — category profiler and top-N (FR-2, FR-3, FR-4)
+
+- `com.tickpilot.profiler.TickProfiler` — a frame stack that charges each region only its **self
+  time**, `elapsed - childNanos`, and passes the full elapsed up to its parent. This is the whole
+  point of the class: the three regions worth timing are nested inside one another, verified
+  against the decompiled 1.21.1 sources —
+  `tickNonPassenger` ⊃ `tickPassenger` (recursively), `tickBlockEntities` ⊃
+  `BoundTickingBlockEntity.tick`, `ServerChunkCache.tick` ⊃ `ServerLevel.tickChunk` — and a plain
+  start/stop pair around each would report a tick as costing more than it did, which AC-2 forbids.
+  Sum of self times equals the outermost span by construction.
+- Self-check counters (`droppedFrames`, `unbalancedEnds`, `abandonedFrames`, `overrunTicks`). If
+  any is non-zero the report says the numbers are not trustworthy instead of printing them
+  straight. Categories exceeding TOTAL is counted, not clamped away.
+- **INV-6:** the four stack arrays plus the two accumulator arrays are allocated once in the
+  constructor and reused for the life of the server.
+  `TickProfilerTest.theFrameStackIsAllocatedOnceAndReused` reads them back through reflection
+  after 100 ticks × 500 entities × 2 nesting levels and fails the build on reallocation.
+- **Seven Mixins**, all with the MX-2 Javadoc block, every target verified against
+  `mappings.tiny` *and* `javap` on the jar the project compiles against:
+
+  | Category | Target |
+  |---|---|
+  | ENTITIES | `ServerLevel.tickNonPassenger`, `ServerLevel.tickPassenger` |
+  | BLOCK_ENTITIES | `Level.tickBlockEntities`, `LevelChunk$BoundTickingBlockEntity.tick` |
+  | SCHEDULED_TICKS | `LevelTicks.tick(JILjava/util/function/BiConsumer;)V` |
+  | RANDOM_TICKS | `ServerLevel.tickChunk` |
+  | CHUNK_OPS | `ServerChunkCache.tick` |
+  | SAVING | the `saveEverything` call site inside `MinecraftServer.tickServer` |
+  | NETWORK | `ServerConnectionListener.tick` |
+
+- **The block entity trap, found by reading the source rather than by guessing.** The obvious
+  target for per-type timing is the `TickingBlockEntity` interface, and it is wrong:
+  `LevelChunk.updateBlockEntityTicker` registers a `RebindableTickingBlockEntityWrapper`, whose
+  `tick()` delegates to the `BoundTickingBlockEntity` it wraps. Every ticking block entity passes
+  through **two** `TickingBlockEntity.tick()` frames per tick, so hooking the interface would have
+  doubled every measurement, and would additionally have caught `NULL_TICKER`.
+  `BoundTickingBlockEntity` is the leaf and the only one of the three that knows its block entity.
+- **The entity recursion, corrected.** `tickNonPassenger` is *not* recursive — the recursion lives
+  entirely in `tickPassenger` — and it has exactly one caller in the game, which skips any entity
+  that has a vehicle. So the category needs no re-entrancy flag at all; only the per-type
+  attribution needs the child subtraction, so a passenger is charged to its own type rather than
+  to the boat.
+- No new dependency. MixinExtras 0.5.4, used for the one `@WrapOperation`, is nested inside
+  `fabric-loader-0.19.3.jar` and already on the compile classpath.
+- `ProfilerHook` parks the active profiler for the duration of a tick and compares the calling
+  thread on every call, so a singleplayer client running `ClientLevel.tickBlockEntities` on the
+  render thread through the same Mixins cannot corrupt the server's stack (INV-1). Cleared at
+  every tick end and at shutdown, so nothing survives a world (INV-7).
+- `/tickpilot top` prints the category split; a category with no injection point prints `n/a`,
+  never `0.00` (AC-2). Deep profiling is driven by `sampling_enabled` for now; the command that
+  starts a timed session arrives with FR-4.
+- 20 new unit tests, none of which launch Minecraft; suite total 144.
+- **SPEC changes:** MX-3 now forbids `@Redirect` as well as `@Overwrite` (§13 entry #12);
+  `RANDOM_TICKS` is displayed as "Chunk environment" because its only safe measurement point is
+  wider than its name (§13 entry #13).
+
+#### Verified under load, with Lithium installed
+
+Real `lithium-fabric-0.15.4+mc1.21.1` from Modrinth in `run/mods/`, dedicated server, a real client
+connected, ~400 zombies plus assorted farm animals, hoppers and furnaces around the player. Both
+mods loaded with no Mixin or refmap error of any kind, and a 20 s session reported:
+
+```
+Profiling session finished: 402 ticks, 12.32 ms/tick total
+  ENTITIES 64.4%  CHUNK_OPS 22.0%  SCHEDULED_TICKS 4.7%  NETWORK 3.8%
+  RANDOM_TICKS 2.1%  OTHER 2.6%  BLOCK_ENTITIES 0.4%  SAVING 0.0%
+```
+
+The AC-2 check that an idle server cannot give: the eight categories sum to **100.00 %** of TOTAL
+with `OTHER` at only 2.6 %, and every self-check counter stayed at zero — no double counting, no
+overrun, nothing dropped. `RANDOM_TICKS` is non-zero here because chunk environment ticking needs
+a player within spawning range, which is why it reads 0.00 on an empty server.
+
+#### Not implemented / deferred
+
+- **Chunk sending to players is in `OTHER`** — deliberate, documented in the README and in
+  `ServerConnectionListenerMixin`.
+- **No load test beyond a single machine** — the Lithium run above is one server, one client, one
+  mod. Behaviour in a hundred-mod pack is argued from Lithium's source, not measured.
+- **Per-type top-N (FR-3) and the timed session command (FR-4)** — next, in their own commits.
+- **The mod's own overhead (INV-10, FR-12)** — not measured yet; its own commit.
+
 ### Phase 4 — configuration (FR-15, AC-15)
 
 - `config/tickpilot.toml` — every key and default of the FR-15 schema, created with its comments

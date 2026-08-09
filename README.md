@@ -34,6 +34,7 @@ mid-tick, which reads as a permanent 19.80 on a perfectly healthy server.
 |---|---|---|
 | `/tickpilot status` | everyone | TPS, MSPT (last / 5 s / 1 min / 5 min averages, p95, p99, max), load level, uptime |
 | `/tickpilot reload` | level 2 | Re-reads `config/tickpilot.toml` and reports what it accepted |
+| `/tickpilot top` | level 2 | Tick cost split by category |
 
 Example output:
 
@@ -70,6 +71,43 @@ up long enough to fill reads `n/a` rather than quietly averaging less time than 
 ```
 MSPT: last 0.12, avg 5s 0.10, 1m 0.88, 5m n/a
 ```
+
+## Where the tick goes
+
+Deep profiling is **off by default**, because the measurement itself is not free: with no session
+running, each hook costs one field read and a null check, and in particular no
+`System.nanoTime()` call. Turn it on with `sampling_enabled` in the config.
+
+```
+/tickpilot top
+Tick cost over 402 ticks, 12.32 ms/tick total
+  ENTITIES: 7.93 ms/tick (64.4%)      CHUNK_OPS: 2.71 ms/tick (22.0%)
+  SCHEDULED_TICKS: 0.57 ms/tick (4.7%)  NETWORK: 0.47 ms/tick (3.8%)
+  RANDOM_TICKS: 0.26 ms/tick (2.1%)     BLOCK_ENTITIES: 0.05 ms/tick (0.4%)
+  SAVING: 0.00 ms/tick (0.0%)           OTHER: 0.33 ms/tick (2.6%)
+```
+
+### Reading the categories honestly
+
+**`Other` is not a category, it is a remainder** — total tick time minus everything measured. A
+large `Other` means the mod is not measuring where your time goes, not that the time is cheap.
+
+**A category with no injection point prints `n/a`, never `0.00`.** Zero would claim the work
+happened and cost nothing; `n/a` says the mod cannot see it.
+
+**`Chunk environment` is wider than "random ticks".** The only safe measurement point covers
+lightning, ice and snow, precipitation *and* the random block ticks in one span. Splitting it
+would need a timer around every block, which would cost more than the thing being measured.
+
+**Nested work is never counted twice.** A passenger's time is inside its vehicle's; a block
+entity's is inside the block entity phase; the per-chunk environment ticking is inside chunk
+operations. Each frame reports only what it spent outside its children, so the categories sum to
+the real tick instead of overshooting it. If that arithmetic ever fails, the output says so in red
+rather than printing a plausible lie.
+
+**Chunk sending to players is not in `Network`.** It happens per player at the server level while
+`Network` is the connection tick, and folding one into the other would make the numbers
+unpredictable. It sits in `Other`.
 
 ## Configuration
 

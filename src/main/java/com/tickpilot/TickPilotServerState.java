@@ -6,6 +6,9 @@ import com.tickpilot.budget.TickBudget;
 import com.tickpilot.config.TickPilotConfig;
 import com.tickpilot.metrics.TickMetrics;
 import com.tickpilot.metrics.TickMetricsSnapshot;
+import com.tickpilot.profiler.ProfilerHook;
+import com.tickpilot.profiler.TickCategory;
+import com.tickpilot.profiler.TickProfiler;
 
 /**
  * Owns all TickPilot state belonging to exactly one running server.
@@ -35,6 +38,7 @@ public final class TickPilotServerState {
 
 	private final long startedAtNanos;
 	private final TickMetrics metrics = new TickMetrics();
+	private final TickProfiler profiler = new TickProfiler();
 
 	private volatile TickPilotConfig config;
 	private volatile TickBudget budget;
@@ -50,6 +54,29 @@ public final class TickPilotServerState {
 		this.config = config;
 		this.budget = newBudget(config, startedAtNanos / NANOS_PER_MILLI,
 				TickBudget.DEFAULT_WARMUP_MILLIS);
+		// FR-15 `sampling_enabled`: deep profiling from the first tick instead of waiting for
+		// /tickpilot profile. Off by default (INV-3).
+		this.profiler.setEnabled(config.samplingEnabled());
+		declareProfiledCategories(this.profiler);
+	}
+
+	/**
+	 * Declares which SPEC FR-2 categories actually have a Mixin behind them. Everything not listed
+	 * here is reported as {@code n/a} rather than as zero (AC-2), so this list is the single place
+	 * that has to stay in step with {@code tickpilot.mixins.json}.
+	 *
+	 * <p>Safe to assert rather than detect: {@code tickpilot.mixins.json} sets
+	 * {@code defaultRequire: 1}, so a Mixin that failed to apply takes the server down at class
+	 * load instead of silently producing a category of zeros.
+	 */
+	private static void declareProfiledCategories(TickProfiler profiler) {
+		profiler.markAvailable(TickCategory.ENTITIES);
+		profiler.markAvailable(TickCategory.BLOCK_ENTITIES);
+		profiler.markAvailable(TickCategory.SCHEDULED_TICKS);
+		profiler.markAvailable(TickCategory.RANDOM_TICKS);
+		profiler.markAvailable(TickCategory.CHUNK_OPS);
+		profiler.markAvailable(TickCategory.NETWORK);
+		profiler.markAvailable(TickCategory.SAVING);
 	}
 
 	private static TickBudget newBudget(TickPilotConfig config, long nowMillis, long warmupMillis) {
@@ -77,6 +104,11 @@ public final class TickPilotServerState {
 	/** @return the load level state machine owned by this server (SPEC FR-5) */
 	public TickBudget budget() {
 		return budget;
+	}
+
+	/** @return the category profiler owned by this server (SPEC FR-2) */
+	public TickProfiler profiler() {
+		return profiler;
 	}
 
 	/** @return the config snapshot this server is running on (SPEC FR-15) */
@@ -128,6 +160,13 @@ public final class TickPilotServerState {
 	 */
 	void onTickStart(long nowNanos) {
 		metrics.onTickStart(nowNanos);
+		profiler.beginTick(nowNanos);
+
+		// Parked only while a session runs, so with profiling off every Mixin hook costs one
+		// static read and a null check - no System.nanoTime() (SPEC FR-4, INV-10).
+		if (profiler.isEnabled()) {
+			ProfilerHook.attach(profiler);
+		}
 	}
 
 	/**
@@ -138,9 +177,15 @@ public final class TickPilotServerState {
 	 *         The caller logs it exactly once (SPEC AC-5).
 	 */
 	LoadLevelTransition onTickEnd(long nowNanos) {
+		// Unparked first and unconditionally: no Mixin hook may see a live profiler outside the
+		// tick, and nothing must be left parked across a world (SPEC INV-7).
+		ProfilerHook.detach();
+
 		if (!metrics.onTickEnd(nowNanos)) {
 			return null;
 		}
+
+		profiler.endTick(metrics.lastDurationNanos());
 
 		// The 5 s window is the smoothed input FR-5 asks for: long enough that one slow tick
 		// cannot move the level, short enough to react within seconds.
@@ -223,6 +268,11 @@ public final class TickPilotServerState {
 	 */
 	void shutdown() {
 		this.disabled = true;
+		// Belt and braces: if the server stops mid-tick, nothing may stay parked into the next
+		// world (SPEC INV-7, AC-19).
+		ProfilerHook.detach();
+		profiler.setEnabled(false);
+		profiler.resetSession();
 		metrics.reset();
 	}
 }

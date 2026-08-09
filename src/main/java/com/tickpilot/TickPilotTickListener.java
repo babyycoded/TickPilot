@@ -1,5 +1,7 @@
 package com.tickpilot;
 
+import java.util.Locale;
+
 import com.tickpilot.budget.LoadLevelTransition;
 
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
@@ -78,7 +80,7 @@ final class TickPilotTickListener {
 				// SPEC AC-5 / AC-16: one line per transition, never per tick.
 				TickPilot.LOGGER.info("Load level {} -> {} (avg MSPT {})",
 						transition.from(), transition.to(),
-						String.format(java.util.Locale.ROOT, "%.2f", transition.avgMspt()));
+						String.format(Locale.ROOT, "%.2f", transition.avgMspt()));
 			}
 		} catch (Throwable t) {
 			state.disable("tick end measurement failed: " + t);
