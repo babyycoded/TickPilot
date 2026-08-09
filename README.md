@@ -37,12 +37,31 @@ mid-tick, which reads as a permanent 19.80 on a perfectly healthy server.
 Example output:
 
 ```
-TickPilot — 14203 ticks measured, uptime 11m 50s
+TickPilot - 14203 ticks measured, uptime 11m 50s
 TPS: 20.00
 MSPT: last 8.41, avg 5s 9.02, 1m 8.77, 5m 8.61
-MSPT: p95 14.30, p99 22.85, max 61.20 (last 5 min)
+MSPT: p95 14.30, p99 22.85 (last 1m)
+MSPT: max 61.20, 3m 12s ago; p95 15.02, p99 40.11 (history: 5m 00s)
 Load level: NORMAL (target 40.00 / high 45.00 / critical 50.00 ms)
 ```
+
+### Reading the two percentile lines
+
+They answer different questions and will disagree, on purpose.
+
+The **first line** covers the last minute: this is how the server is behaving *now*. The
+**second** covers everything still in the ring buffer — about five minutes at 20 TPS — and is how
+bad it has been *lately*, together with the single worst tick and how long ago it happened.
+
+A server that has just finished generating its spawn chunks shows something like `p95 0.20 (last
+1m)` next to `max 207.89, 1m 45s ago`. Both are true: the burst is over, and it is still recent
+enough to be worth explaining. One window alone cannot say that — whole-history percentiles keep
+a recovered server looking broken for five minutes, and a short window alone loses the outlier
+entirely.
+
+The span in brackets is what the buffer actually holds, not a nominal figure. A server up for
+forty seconds says `(last 40s)`, because the buffer is bounded by sample count and five minutes
+of it only exists at a full 20 TPS.
 
 ## Load levels
 

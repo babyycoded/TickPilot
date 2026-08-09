@@ -6,17 +6,27 @@ package com.tickpilot.metrics;
  * <p>Created only by query paths such as {@code /tickpilot status}; never per tick, so it does
  * not violate SPEC INV-6. All MSPT values are milliseconds.
  *
- * @param tps         ticks per second over the last 5 s, capped at 20
- * @param lastMspt    duration of the most recently completed tick
- * @param avgMspt5s   mean MSPT over the last 5 s
- * @param avgMspt1m   mean MSPT over the last minute
- * @param avgMspt5m   mean MSPT over the last 5 min
- * @param p95Mspt     95th percentile MSPT over the retained history
- * @param p99Mspt     99th percentile MSPT over the retained history
- * @param maxMspt     longest tick in the retained history
- * @param totalTicks  ticks measured since the server started
- * @param sampleCount samples currently held in the ring buffer
- * @param uptimeNanos how long the owning server has been up
+ * <p>Percentiles come in two windows on purpose. The 1 min pair answers "how is the server
+ * behaving now" and recovers from an outlier within a minute; the history pair answers "how bad
+ * has it been lately" and keeps the outlier until it is evicted from the ring buffer. Showing
+ * only the second is what makes a server that recovered a minute ago still look broken.
+ *
+ * @param tps                ticks per second over the last 5 s, capped at 20
+ * @param lastMspt           duration of the most recently completed tick
+ * @param avgMspt5s          mean MSPT over the last 5 s
+ * @param avgMspt1m          mean MSPT over the last minute
+ * @param avgMspt5m          mean MSPT over the last 5 min
+ * @param p95Mspt1m          95th percentile MSPT over the last minute
+ * @param p99Mspt1m          99th percentile MSPT over the last minute
+ * @param p95MsptHistory     95th percentile MSPT over the whole retained history
+ * @param p99MsptHistory     99th percentile MSPT over the whole retained history
+ * @param maxMspt            longest tick in the retained history
+ * @param maxAgeNanos        how long ago that longest tick finished
+ * @param retainedSpanNanos  wall-clock time the retained history actually covers; label output
+ *                           with this rather than assuming the nominal buffer length
+ * @param totalTicks         ticks measured since the server started
+ * @param sampleCount        samples currently held in the ring buffer
+ * @param uptimeNanos        how long the owning server has been up
  */
 public record TickMetricsSnapshot(
 		double tps,
@@ -24,9 +34,13 @@ public record TickMetricsSnapshot(
 		double avgMspt5s,
 		double avgMspt1m,
 		double avgMspt5m,
-		double p95Mspt,
-		double p99Mspt,
+		double p95Mspt1m,
+		double p99Mspt1m,
+		double p95MsptHistory,
+		double p99MsptHistory,
 		double maxMspt,
+		long maxAgeNanos,
+		long retainedSpanNanos,
 		long totalTicks,
 		int sampleCount,
 		long uptimeNanos) {
@@ -34,5 +48,16 @@ public record TickMetricsSnapshot(
 	/** @return {@code true} while no tick has been measured yet */
 	public boolean isEmpty() {
 		return sampleCount == 0;
+	}
+
+	/**
+	 * How much history the 1 min percentiles actually cover, which is less than a minute on a
+	 * server that has not been up that long. Callers label their output with this so a 40 s old
+	 * server says "last 40s" instead of claiming a minute.
+	 *
+	 * @return the shorter of one minute and {@link #retainedSpanNanos()}
+	 */
+	public long shortPercentileSpanNanos() {
+		return Math.min(TickMetrics.WINDOW_1M_NANOS, retainedSpanNanos);
 	}
 }

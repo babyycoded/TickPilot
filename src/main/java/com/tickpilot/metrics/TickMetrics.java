@@ -231,16 +231,7 @@ public final class TickMetrics {
 	 * @return ticks per second in {@code [0, 20]}, or 0 until two ticks have been measured
 	 */
 	public double tps(long nowNanos) {
-		long cutoff = nowNanos - WINDOW_5S_NANOS;
-		int n = 0;
-
-		for (int i = 0; i < sampleCount; i++) {
-			if (endNanos[indexFromNewest(i)] <= cutoff) {
-				break;
-			}
-
-			n++;
-		}
+		int n = samplesInWindow(nowNanos - WINDOW_5S_NANOS);
 
 		// One sample describes no interval, so there is nothing to derive a rate from yet.
 		if (n < 2) {
@@ -266,15 +257,50 @@ public final class TickMetrics {
 		return Math.min(TARGET_TPS, periods * NANOS_PER_SECOND / span);
 	}
 
-	/** @return longest tick in the retained history, in milliseconds, or 0 if there are none */
+	/**
+	 * Longest tick in the whole retained history.
+	 *
+	 * <p>Unlike the percentiles this deliberately spans everything the buffer holds rather than a
+	 * short window: SPEC AC-13 asks {@code explain} for the slowest tick <em>and when it happened</em>,
+	 * which is only answerable if the outlier is kept around. Pair it with
+	 * {@link #maxSampleAgeNanos(long)} so the number is never presented without its date — an
+	 * undated 208 ms sitting in the output for five minutes is exactly what makes an operator
+	 * think the server is still in trouble.
+	 *
+	 * @return the longest tick in milliseconds, or 0 if there are no samples
+	 */
 	public double maxMspt() {
-		long max = 0L;
+		int index = indexOfMax();
+		return index < 0 ? 0.0 : toMillis(durationNanos[index]);
+	}
 
-		for (int i = 0; i < sampleCount; i++) {
-			max = Math.max(max, durationNanos[i]);
+	/**
+	 * @param nowNanos current {@link System#nanoTime()}
+	 * @return how long ago the tick reported by {@link #maxMspt()} finished, or 0 if there are
+	 *         no samples
+	 */
+	public long maxSampleAgeNanos(long nowNanos) {
+		int index = indexOfMax();
+		return index < 0 ? 0L : nowNanos - endNanos[index];
+	}
+
+	/**
+	 * How much wall-clock time the retained history actually covers.
+	 *
+	 * <p>The buffer is bounded by sample <em>count</em>, not by time: {@link #DEFAULT_CAPACITY}
+	 * samples is five minutes only while the server holds 20 TPS, and less than that until the
+	 * buffer has filled. Callers label their output with this value instead of assuming a nominal
+	 * span, so a server that has been up for 40 s says so rather than claiming five minutes.
+	 *
+	 * @param nowNanos current {@link System#nanoTime()}
+	 * @return nanoseconds between the oldest retained sample and now, or 0 if there are none
+	 */
+	public long retainedSpanNanos(long nowNanos) {
+		if (sampleCount == 0) {
+			return 0L;
 		}
 
-		return toMillis(max);
+		return nowNanos - endNanos[indexFromNewest(sampleCount - 1)];
 	}
 
 	/**
@@ -284,13 +310,16 @@ public final class TickMetrics {
 	 * a duration that a real tick actually had, which is what an operator reading
 	 * {@code /tickpilot status} expects.
 	 *
+	 * <p>Spanning the whole buffer means a single outlier keeps influencing the answer until it is
+	 * evicted — for five minutes at 20 TPS. That is the right window for "how bad has it been
+	 * lately" and the wrong one for "how is it right now"; use
+	 * {@link #percentileMspt(double, long, long)} for the latter.
+	 *
 	 * @param percentile in {@code (0, 100]}
 	 * @return the percentile in milliseconds, or 0 when no samples are held
 	 */
 	public double percentileMspt(double percentile) {
-		if (percentile <= 0.0 || percentile > 100.0) {
-			throw new IllegalArgumentException("percentile must be in (0, 100], got " + percentile);
-		}
+		checkPercentile(percentile);
 
 		if (sampleCount == 0) {
 			return 0.0;
@@ -299,25 +328,76 @@ public final class TickMetrics {
 		// Allocates: query path only, never the tick loop (SPEC INV-6).
 		long[] sorted = Arrays.copyOf(durationNanos, sampleCount);
 		Arrays.sort(sorted);
-
-		int rank = (int) Math.ceil(percentile / 100.0 * sampleCount);
-		int index = Math.min(sampleCount - 1, Math.max(0, rank - 1));
-		return toMillis(sorted[index]);
+		return toMillis(sorted[rankIndex(percentile, sampleCount)]);
 	}
 
-	/** @return 95th percentile MSPT over the retained history (SPEC AC-1) */
+	/**
+	 * Nearest-rank percentile over the samples inside the given window.
+	 *
+	 * <p>Why a windowed variant exists at all: a startup burst or an autosave leaves slow ticks in
+	 * the buffer that then dominate p95/p99 for as long as they are retained, so a server that
+	 * recovered seconds ago still reads as if it were struggling. Measured against a real server,
+	 * whole-history p95 read 3.47 ms while vanilla's own 100-tick window read 0.3 ms — the same
+	 * server, two different questions.
+	 *
+	 * <p>The window has to be wide enough for the rank to mean something. At 20 TPS a 5 s window
+	 * holds 100 samples, so its p99 is the second-slowest tick of the hundred and swings wildly;
+	 * vanilla's own P99 moved 0.5 → 8.2 → 0.5 ms across three queries 25 s apart on an idle
+	 * server. {@link #WINDOW_1M_NANOS} holds 1200 samples and does not do that.
+	 *
+	 * @param percentile  in {@code (0, 100]}
+	 * @param windowNanos length of the window ending at {@code nowNanos}
+	 * @param nowNanos    current {@link System#nanoTime()}
+	 * @return the percentile in milliseconds, or 0 when the window holds no samples
+	 */
+	public double percentileMspt(double percentile, long windowNanos, long nowNanos) {
+		checkPercentile(percentile);
+
+		int n = samplesInWindow(nowNanos - windowNanos);
+
+		if (n == 0) {
+			return 0.0;
+		}
+
+		// Allocates: query path only, never the tick loop (SPEC INV-6).
+		long[] sorted = new long[n];
+
+		for (int i = 0; i < n; i++) {
+			sorted[i] = durationNanos[indexFromNewest(i)];
+		}
+
+		Arrays.sort(sorted);
+		return toMillis(sorted[rankIndex(percentile, n)]);
+	}
+
+	/** @return 95th percentile MSPT over the whole retained history (SPEC AC-1) */
 	public double p95Mspt() {
 		return percentileMspt(95.0);
 	}
 
-	/** @return 99th percentile MSPT over the retained history (SPEC AC-1) */
+	/** @return 99th percentile MSPT over the whole retained history (SPEC AC-1) */
 	public double p99Mspt() {
 		return percentileMspt(99.0);
+	}
+
+	/** @return 95th percentile MSPT over the last minute */
+	public double p95Mspt1m(long nowNanos) {
+		return percentileMspt(95.0, WINDOW_1M_NANOS, nowNanos);
+	}
+
+	/** @return 99th percentile MSPT over the last minute */
+	public double p99Mspt1m(long nowNanos) {
+		return percentileMspt(99.0, WINDOW_1M_NANOS, nowNanos);
 	}
 
 	/**
 	 * Builds an immutable read-only view of every value in SPEC AC-1 in one pass of query calls,
 	 * so a caller cannot print numbers taken from two different moments.
+	 *
+	 * <p>Both percentile windows are carried. {@code status} shows the short one, and
+	 * {@code explain} (SPEC FR-13) needs the pair: "p99 is 8.2 ms over the last five minutes but
+	 * 0.5 ms over the last minute" says the slow ticks are behind us, which neither number says
+	 * alone.
 	 *
 	 * @param nowNanos    current {@link System#nanoTime()}
 	 * @param uptimeNanos how long the owning server has been up
@@ -329,9 +409,13 @@ public final class TickMetrics {
 				averageMspt5s(nowNanos),
 				averageMspt1m(nowNanos),
 				averageMspt5m(nowNanos),
+				p95Mspt1m(nowNanos),
+				p99Mspt1m(nowNanos),
 				p95Mspt(),
 				p99Mspt(),
 				maxMspt(),
+				maxSampleAgeNanos(nowNanos),
+				retainedSpanNanos(nowNanos),
 				totalTicks,
 				sampleCount,
 				uptimeNanos);
@@ -347,6 +431,46 @@ public final class TickMetrics {
 		lastDurationNanos = 0L;
 		openTickStartNanos = 0L;
 		tickOpen = false;
+	}
+
+	/**
+	 * @param cutoffNanos exclusive lower bound on a sample's end timestamp
+	 * @return how many of the newest samples end strictly after {@code cutoffNanos}. Samples are
+	 *         stored in ascending time order, so the walk stops at the first one that is too old.
+	 */
+	private int samplesInWindow(long cutoffNanos) {
+		int n = 0;
+
+		while (n < sampleCount && endNanos[indexFromNewest(n)] > cutoffNanos) {
+			n++;
+		}
+
+		return n;
+	}
+
+	/** @return backing array index of the longest retained sample, or -1 if there are none */
+	private int indexOfMax() {
+		int best = -1;
+
+		for (int i = 0; i < sampleCount; i++) {
+			if (best < 0 || durationNanos[i] > durationNanos[best]) {
+				best = i;
+			}
+		}
+
+		return best;
+	}
+
+	private static void checkPercentile(double percentile) {
+		if (percentile <= 0.0 || percentile > 100.0) {
+			throw new IllegalArgumentException("percentile must be in (0, 100], got " + percentile);
+		}
+	}
+
+	/** @return index into an ascending array of {@code n} samples holding the nearest rank */
+	private static int rankIndex(double percentile, int n) {
+		int rank = (int) Math.ceil(percentile / 100.0 * n);
+		return Math.min(n - 1, Math.max(0, rank - 1));
 	}
 
 	/**

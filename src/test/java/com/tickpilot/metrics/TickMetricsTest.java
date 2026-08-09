@@ -278,6 +278,107 @@ class TickMetricsTest {
 	}
 
 	@Test
+	void windowedPercentilesIgnoreSamplesOutsideTheWindow() {
+		TickMetrics metrics = new TickMetrics();
+
+		// Two minutes of ticks: the first minute slow, the second fast.
+		for (int i = 0; i < 2400; i++) {
+			long start = ms(50) * i;
+			metrics.onTickStart(start);
+			metrics.onTickEnd(start + ms(i < 1200 ? 30 : 2));
+		}
+
+		long now = ms(50) * 2400;
+
+		assertEquals(2.0, metrics.p95Mspt1m(now), EPSILON, "the slow minute is out of the window");
+		assertEquals(2.0, metrics.p99Mspt1m(now), EPSILON);
+		assertEquals(30.0, metrics.p95Mspt(), EPSILON, "but it is still in the history");
+		assertEquals(30.0, metrics.p99Mspt(), EPSILON);
+	}
+
+	@Test
+	void startupSpikeStopsSkewingPercentilesOnceItLeavesTheWindow() {
+		// Regression, found by cross-checking against vanilla /tick query: a server that has just
+		// generated its spawn chunks carries ~200 ms ticks in the buffer, and whole-history
+		// percentiles kept reporting them as if the server were still struggling. Vanilla read
+		// p95 0.3 ms over its 100-tick window while TickPilot read 3.47 ms over five minutes.
+		TickMetrics metrics = new TickMetrics();
+
+		// 40 slow startup ticks, the worst of them 208 ms.
+		for (int i = 0; i < 40; i++) {
+			long start = ms(50) * i;
+			metrics.onTickStart(start);
+			metrics.onTickEnd(start + ms(i == 12 ? 208 : 117));
+		}
+
+		// Then 90 s of a healthy, idle server.
+		for (int i = 40; i < 40 + 1800; i++) {
+			long start = ms(50) * i;
+			metrics.onTickStart(start);
+			metrics.onTickEnd(start + ms(0.2));
+		}
+
+		long now = ms(50) * (40 + 1800);
+
+		assertEquals(0.2, metrics.p95Mspt1m(now), EPSILON, "the last minute is quiet and must say so");
+		assertEquals(0.2, metrics.p99Mspt1m(now), EPSILON);
+
+		// The outlier is still in the history, which is what makes it explainable rather than lost.
+		assertEquals(208.0, metrics.maxMspt(), EPSILON);
+		assertEquals(ms(91_192), metrics.maxSampleAgeNanos(now),
+				"the max must come with a date, not float free");
+
+		// 40 slow ticks out of 1840 are 2.2 % of the history, so even the history p95 has washed
+		// them out; only p99 still sees the burst. Both are true statements about a different
+		// question than the 1 min pair answers.
+		assertEquals(0.2, metrics.p95Mspt(), EPSILON);
+		assertEquals(117.0, metrics.p99Mspt(), EPSILON);
+	}
+
+	@Test
+	void retainedSpanReportsWhatTheBufferActuallyCovers() {
+		TickMetrics metrics = new TickMetrics();
+
+		assertEquals(0L, metrics.retainedSpanNanos(ms(1000)), "an empty buffer covers nothing");
+
+		// 40 s of ticks: the span must say 40 s, not the nominal 5 min of the buffer.
+		long now = recordSteady(metrics, 800, 50.0, 1.0);
+
+		assertEquals(ms(50) * 800 - ms(1), metrics.retainedSpanNanos(now));
+		assertTrue(metrics.retainedSpanNanos(now) < TickMetrics.WINDOW_1M_NANOS,
+				"40 s of history must not be presented as a full minute");
+	}
+
+	@Test
+	void retainedSpanStopsGrowingOnceTheBufferIsFull() {
+		TickMetrics metrics = new TickMetrics(100);
+		long now = recordSteady(metrics, 500, 50.0, 1.0);
+
+		// 100 samples 50 ms apart cover 99 periods plus the trailing gap to now.
+		assertEquals(ms(50) * 100 - ms(1), metrics.retainedSpanNanos(now));
+	}
+
+	@Test
+	void windowedPercentileHandlesTheSameEdgeCasesAsTheHistoryOne() {
+		TickMetrics metrics = new TickMetrics();
+
+		assertEquals(0.0, metrics.p95Mspt1m(ms(1000)), EPSILON, "empty buffer");
+
+		metrics.onTickStart(0L);
+		metrics.onTickEnd(ms(7));
+
+		assertEquals(7.0, metrics.p95Mspt1m(ms(10)), EPSILON, "one sample");
+		assertEquals(7.0, metrics.p99Mspt1m(ms(10)), EPSILON);
+		assertEquals(0.0, metrics.p95Mspt1m(ms(120_000)), EPSILON, "sample older than the window");
+
+		TickMetrics identical = new TickMetrics();
+		long now = recordSteady(identical, 600, 50.0, 3.5);
+
+		assertEquals(3.5, identical.p95Mspt1m(now), EPSILON, "identical samples");
+		assertEquals(3.5, identical.p99Mspt1m(now), EPSILON);
+	}
+
+	@Test
 	void percentileRejectsValuesOutsideItsRange() {
 		TickMetrics metrics = new TickMetrics();
 		metrics.onTickStart(0L);
@@ -360,12 +461,31 @@ class TickMetricsTest {
 		assertEquals(10.0, snapshot.avgMspt5s(), EPSILON);
 		assertEquals(10.0, snapshot.avgMspt1m(), EPSILON);
 		assertEquals(10.0, snapshot.avgMspt5m(), EPSILON);
-		assertEquals(10.0, snapshot.p95Mspt(), EPSILON);
-		assertEquals(10.0, snapshot.p99Mspt(), EPSILON);
+		assertEquals(10.0, snapshot.p95Mspt1m(), EPSILON);
+		assertEquals(10.0, snapshot.p99Mspt1m(), EPSILON);
+		assertEquals(10.0, snapshot.p95MsptHistory(), EPSILON);
+		assertEquals(10.0, snapshot.p99MsptHistory(), EPSILON);
 		assertEquals(10.0, snapshot.maxMspt(), EPSILON);
 		assertEquals(100L, snapshot.totalTicks());
 		assertEquals(100, snapshot.sampleCount());
 		assertEquals(ms(90_000), snapshot.uptimeNanos());
+
+		// 100 ticks 50 ms apart cover just under 5 s, so the label must say 5 s and not a minute.
+		assertEquals(ms(4_990), snapshot.retainedSpanNanos());
+		assertEquals(ms(4_990), snapshot.shortPercentileSpanNanos(),
+				"a server younger than the window is labelled with what it actually has");
+	}
+
+	@Test
+	void shortPercentileSpanSaturatesAtOneMinute() {
+		TickMetrics metrics = new TickMetrics();
+		long now = recordSteady(metrics, 4000, 50.0, 1.0);
+
+		TickMetricsSnapshot snapshot = metrics.snapshot(now, ms(200_000));
+
+		assertEquals(TickMetrics.WINDOW_1M_NANOS, snapshot.shortPercentileSpanNanos());
+		assertTrue(snapshot.retainedSpanNanos() > TickMetrics.WINDOW_1M_NANOS,
+				"the history line still reports the full retained span");
 	}
 
 	@Test
