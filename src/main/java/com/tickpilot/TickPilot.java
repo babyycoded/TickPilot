@@ -30,6 +30,7 @@ public class TickPilot implements ModInitializer {
 		ServerLifecycleEvents.SERVER_STOPPING.register(TickPilot::onServerStopping);
 		ServerLifecycleEvents.SERVER_STOPPED.register(TickPilot::onServerStopped);
 
+		TickPilotTickListener.register();
 		TickPilotCommand.register();
 	}
 
