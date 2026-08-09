@@ -57,7 +57,11 @@ final class TickPilotTickListener {
 
 		// INV-9: measurement must never be able to take the server down.
 		try {
-			state.onTickStart(System.nanoTime());
+			// The same reading opens the tick and starts the overhead measurement, so timing
+			// ourselves costs one extra nanoTime() per half-tick and not two (SPEC INV-10).
+			long startNanos = System.nanoTime();
+			state.onTickStart(startNanos);
+			state.recordOverhead(System.nanoTime() - startNanos);
 		} catch (Throwable t) {
 			state.disable("tick start measurement failed: " + t);
 		}
@@ -122,10 +126,14 @@ final class TickPilotTickListener {
 		try {
 			// SPEC AC-1b: /tick freeze and /tick rate change what a low TPS means, so the state
 			// is captured every tick and shown by `status` instead of being read as overload.
+			// Taken first so it is both the tick's end timestamp and the start of the overhead
+			// measurement: everything below is TickPilot's own work, and none of it belongs in the
+			// tick duration (SPEC INV-10).
+			long nowNanos = System.nanoTime();
+
 			ServerTickRateManager tickRate = server.tickRateManager();
 			state.onTickRateState(tickRate.isFrozen(), tickRate.runsNormally(), tickRate.tickrate());
 
-			long nowNanos = System.nanoTime();
 			LoadLevelTransition transition = state.onTickEnd(nowNanos);
 
 			// SPEC AC-4: a timed session prints its report when it runs out. To the log, because
@@ -141,6 +149,10 @@ final class TickPilotTickListener {
 						transition.from(), transition.to(),
 						String.format(Locale.ROOT, "%.2f", transition.avgMspt()));
 			}
+
+			// Last, so the measurement covers everything this half of the listener did, the
+			// end-of-session report included (SPEC INV-10).
+			state.recordOverhead(System.nanoTime() - nowNanos);
 		} catch (Throwable t) {
 			state.disable("tick end measurement failed: " + t);
 		}

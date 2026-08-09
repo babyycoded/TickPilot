@@ -16,6 +16,7 @@ import com.tickpilot.budget.LoadLevel;
 import com.tickpilot.budget.TickBudget;
 import com.tickpilot.config.ConfigLoadResult;
 import com.tickpilot.config.ConfigLoader;
+import com.tickpilot.metrics.OverheadMeter;
 import com.tickpilot.metrics.TickMetrics;
 import com.tickpilot.metrics.TickMetricsSnapshot;
 import com.tickpilot.profiler.CostTracker;
@@ -48,6 +49,12 @@ public final class TickPilotCommand {
 
 	/** How many types /tickpilot top entities|blockentities lists (SPEC AC-3 top-N). */
 	private static final int TOP_N = 10;
+
+	/**
+	 * How many times {@code OverheadMeter.record} runs in one tick: once around each half of the
+	 * tick listener. Used to turn the mean slice into a per-tick figure.
+	 */
+	private static final int OVERHEAD_SLICES_PER_TICK = 2;
 
 	private static final long NANOS_PER_MILLI = 1_000_000L;
 
@@ -454,6 +461,26 @@ public final class TickPilotCommand {
 				source.sendSuccess(() -> Component.translatable("command.tickpilot.status.warming_up",
 						formatDuration(budget.warmupRemainingMillis(nowNanos / NANOS_PER_MILLI)
 								* NANOS_PER_MILLI)).withStyle(ChatFormatting.YELLOW), false);
+			}
+
+			// SPEC INV-10 / FR-12: the mod's own cost, measured rather than asserted. Two slices
+			// per tick, one around each half of the tick listener.
+			OverheadMeter overhead = state.overhead();
+
+			if (overhead.samples() > 0L) {
+				boolean profiling = state.isProfiling();
+				source.sendSuccess(() -> Component.translatable("command.tickpilot.status.overhead",
+						format(overhead.msptPerTick(OVERHEAD_SLICES_PER_TICK)),
+						format(overhead.percentOf(OVERHEAD_SLICES_PER_TICK, metrics.avgMspt5s())),
+						formatMicros(overhead.peakNanos())), false);
+
+				// Honesty about what that number does and does not cover: while a session runs,
+				// the hooks' own bookkeeping sits inside the categories they measure.
+				if (profiling) {
+					source.sendSuccess(() -> Component.translatable(
+							"command.tickpilot.status.overhead_profiling")
+							.withStyle(ChatFormatting.GRAY), false);
+				}
 			}
 
 			// SPEC AC-1b: say out loud when a low TPS is configured rather than caused by load.

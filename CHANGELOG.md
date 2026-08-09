@@ -57,16 +57,33 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
   thread on every call, so a singleplayer client running `ClientLevel.tickBlockEntities` on the
   render thread through the same Mixins cannot corrupt the server's stack (INV-1). Cleared at
   every tick end and at shutdown, so nothing survives a world (INV-7).
-- `/tickpilot top` prints the category split; a category with no injection point prints `n/a`,
-  never `0.00` (AC-2). `top entities` and `top blockentities` add the costliest types with their
-  instance counts and per-instance averages, grouped by mod namespace (AC-3). Deep profiling is
-  driven by `sampling_enabled` or by `/tickpilot profile <1-300>`, which reports to the server log
-  when it runs out; `profile stop` ends it early and prints the breakdown. Starting a second
-  session is a message, not an exception (AC-4).
-- 29 new unit tests, none of which launch Minecraft; suite total 153.
+- Commands: `/tickpilot profile <1-300>`, `profile stop`, `top`, `top entities`,
+  `top blockentities` (FR-12). Starting a second session is a message, not an exception (AC-4).
+- 46 new unit tests, none of which launch Minecraft; suite total 160.
 - **SPEC changes:** MX-3 now forbids `@Redirect` as well as `@Overwrite` (§13 entry #12);
   `RANDOM_TICKS` is displayed as "Chunk environment" because its only safe measurement point is
   wider than its name (§13 entry #13); AC-3 coordinates deferred (§13 entry #14).
+
+#### The mod's own overhead (INV-10, FR-12)
+
+- `com.tickpilot.metrics.OverheadMeter` — mean, peak and sample count of the time spent inside
+  TickPilot's own code, printed by `/tickpilot status`. This is the SPEC §11 checklist item
+  "measured and shown in `/tickpilot status`", and it is now actually measured.
+- What is timed is the tick listener's own body, bracketed by two extra `nanoTime()` calls per
+  tick. That is the right target because INV-10 caps the overhead *in default mode*, and in
+  default mode there is no session: every Mixin hook is a static read and a null check with no
+  clock call. Timing the per-entity hooks instead would need two clock calls per entity, and the
+  measurement would cost more than the thing measured.
+- Measured on a live dedicated server: **0.01 ms/tick, 0.11 % of MSPT** while the server was doing
+  real work, rising to 0.34 % as the tick got cheaper. Comfortably inside the INV-10 cap.
+- Two caveats are documented in the README rather than left to be discovered. The percentage is
+  meaningless on an idle server — a 0.2 ms vanilla tick makes 0.01 ms read as 5 %, and the run
+  above shows exactly that at 4.79 % once the world went quiet; the absolute figure is what does
+  not move. And the peak slice is normally set during JIT warm-up in the first second (785 us
+  observed), so it reads as "nothing pathological happened later", not as a typical cost.
+- A running session's own cost is deliberately **not** in that number: a hook reads its timestamp
+  before its bookkeeping, so the bookkeeping lands inside the category it measures. Deep profiling
+  inflates the categories it reports, which is stated in the README and in `OverheadMeter`.
 
 #### Verified under load, with Lithium installed
 
@@ -83,7 +100,7 @@ Profiling session finished: 402 ticks, 12.32 ms/tick total
 The AC-2 check that an idle server cannot give: the eight categories sum to **100.00 %** of TOTAL
 with `OTHER` at only 2.6 %, and every self-check counter stayed at zero — no double counting, no
 overrun, nothing dropped. `RANDOM_TICKS` is non-zero here because chunk environment ticking needs
-a player within spawning range, which is why it reads 0.00 on an empty server. The per-type
+a player within spawning range, which is why it read 0.00 on the empty server earlier. The per-type
 numbers reconcile with the category: the ten listed entity types add up to 7.88 ms/tick against an
 `ENTITIES` total of 7.93, the remainder being the two types outside the top 10.
 
@@ -93,7 +110,6 @@ numbers reconcile with the category: the ten listed entity types add up to 7.88 
   top-N buffer during a session. Only type-level aggregation is implemented. §13 entry #14.
 - **Chunk sending to players is in `OTHER`** — deliberate, documented in the README and in
   `ServerConnectionListenerMixin`.
-- **The mod's own overhead (INV-10, FR-12)** — not measured yet; its own commit.
 - **No load test beyond a single machine** — the Lithium run above is one server, one client, one
   mod. Behaviour in a hundred-mod pack is argued from Lithium's source, not measured.
 

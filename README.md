@@ -249,9 +249,32 @@ a fake problem.
 
 ## Overhead
 
-Measurement costs two `System.nanoTime()` calls and a few array writes per tick, with no
-allocation in the tick loop. Percentiles, averages and TPS are computed only when you run a
-command. It is not free, but it is not something you will see in MSPT either.
+Measured, not asserted. `/tickpilot status` prints it:
+
+```
+TickPilot overhead: 0.01 ms/tick (0.11% of MSPT), worst slice 17.6 us
+```
+
+What is timed is the mod's own tick work — the ring buffer write, the load level update and the
+bookkeeping around them — bracketed by two extra `nanoTime()` calls per tick. With no profiling
+session running, that is all TickPilot does: the Mixin hooks are a field read and a null check
+each, with no clock call at all.
+
+Two things this number will not tell you, said plainly rather than left to be discovered:
+
+**The percentage is meaningless on an idle server.** A vanilla server with nobody on it ticks in
+about 0.2 ms, so 0.01 ms of mod work reads as 5 %. The absolute figure is the one that matters and
+it does not move; the ratio only becomes informative once the server has real work to do, which is
+also the only time anyone cares. Measured on a loaded server it sits around 0.1 %.
+
+**The worst slice includes JIT warm-up.** The first ticks after startup run interpreted, so the
+peak is usually set in the first second and then never beaten. Treat it as "nothing pathological
+happened later", not as a typical cost.
+
+**While a profiling session runs, the number above does not cover it.** Each hook reads its
+timestamp before doing its bookkeeping, so that bookkeeping lands inside the category it is
+measuring. Deep profiling inflates the categories it reports, which is a large part of why it is
+off by default and time-limited.
 
 ## Building and testing
 
