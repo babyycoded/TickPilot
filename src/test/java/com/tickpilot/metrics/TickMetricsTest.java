@@ -477,6 +477,29 @@ class TickMetricsTest {
 	}
 
 	@Test
+	void nominalAverageWindowsAreOnlyCoveredOnceTheServerHasLivedThem() {
+		TickMetrics metrics = new TickMetrics();
+		long now = recordSteady(metrics, 1600, 50.0, 1.0);
+
+		// 80 s of uptime: the 5 s and 1 min averages are real, the 5 min one would be an average
+		// over 80 s wearing a "5 min" label, so callers show it as n/a instead (SPEC AC-2's rule).
+		TickMetricsSnapshot young = metrics.snapshot(now, ms(80_000));
+
+		assertTrue(young.covers(TickMetrics.WINDOW_5S_NANOS));
+		assertTrue(young.covers(TickMetrics.WINDOW_1M_NANOS));
+		assertFalse(young.covers(TickMetrics.WINDOW_5M_NANOS));
+
+		TickMetricsSnapshot fresh = metrics.snapshot(now, ms(3_000));
+
+		assertFalse(fresh.covers(TickMetrics.WINDOW_5S_NANOS), "3 s in, even the 5 s window is short");
+		assertFalse(fresh.covers(TickMetrics.WINDOW_1M_NANOS));
+
+		TickMetricsSnapshot grown = metrics.snapshot(now, TickMetrics.WINDOW_5M_NANOS);
+
+		assertTrue(grown.covers(TickMetrics.WINDOW_5M_NANOS), "exactly one window counts as covered");
+	}
+
+	@Test
 	void shortPercentileSpanSaturatesAtOneMinute() {
 		TickMetrics metrics = new TickMetrics();
 		long now = recordSteady(metrics, 4000, 50.0, 1.0);

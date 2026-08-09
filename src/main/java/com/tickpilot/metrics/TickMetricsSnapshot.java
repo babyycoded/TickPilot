@@ -60,4 +60,21 @@ public record TickMetricsSnapshot(
 	public long shortPercentileSpanNanos() {
 		return Math.min(TickMetrics.WINDOW_1M_NANOS, retainedSpanNanos);
 	}
+
+	/**
+	 * Whether the server has been up long enough for a nominal window to mean what it says.
+	 *
+	 * <p>The averages carry the fixed names SPEC AC-1 gives them (5 s / 1 min / 5 min), so unlike
+	 * the percentile lines they cannot be relabelled with the span they really cover. A server up
+	 * for 80 s would otherwise print "avg 5m 1.07" for an average over 80 seconds. Callers show
+	 * {@code n/a} instead when this returns {@code false} — the same choice SPEC AC-2 makes for a
+	 * profiling category that has no data, and for the same reason: a number that quietly means
+	 * something other than its label is worse than an admission that it is missing.
+	 *
+	 * @param windowNanos nominal window length
+	 * @return {@code true} once the measured uptime covers the whole window
+	 */
+	public boolean covers(long windowNanos) {
+		return uptimeNanos >= windowNanos;
+	}
 }

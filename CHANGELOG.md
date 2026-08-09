@@ -55,6 +55,10 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
   for "how bad has it been" — and `TickMetricsSnapshot` carries both so `explain` (FR-13) can
   contrast them. `max` keeps the full history, as AC-13 requires, and is now printed with the
   age of the outlier instead of as a bare number that looks current.
+- **An average window the server has not lived through shows `n/a`.** The three averages carry
+  the fixed names AC-1 gives them, so unlike the percentile lines they cannot be relabelled with
+  the span they cover: at 80 s of uptime `avg 5m 1.07` was an average over 80 seconds wearing a
+  "5 min" label. Same rule as AC-2 uses for a profiling category with no data.
 - **Window labels report the interval actually held.** The ring buffer is bounded by sample
   count, so 6000 samples is five minutes only at a full 20 TPS, and less than that until it
   fills. `status` no longer prints a nominal `(last 5 min)`; a server up for forty seconds says
