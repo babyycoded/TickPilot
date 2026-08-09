@@ -3,6 +3,7 @@ package com.tickpilot;
 import com.tickpilot.budget.LoadLevel;
 import com.tickpilot.budget.LoadLevelTransition;
 import com.tickpilot.budget.TickBudget;
+import com.tickpilot.config.TickPilotConfig;
 import com.tickpilot.metrics.TickMetrics;
 import com.tickpilot.metrics.TickMetricsSnapshot;
 
@@ -13,8 +14,9 @@ import com.tickpilot.metrics.TickMetricsSnapshot;
  * (SPEC FR-19, AC-19). Nothing here outlives the server it was created for, which is what
  * keeps SPEC INV-7 satisfied.
  *
- * <p>This phase adds tick metrics (FR-1) and the load level state machine (FR-5). The profiler
- * (FR-2) and the scheduler (FR-6) are added in later phases and will be owned by this class too.
+ * <p>This phase adds tick metrics (FR-1), the load level state machine (FR-5) and the config
+ * snapshot (FR-15). The profiler (FR-2) and the scheduler (FR-6) are added in later phases and
+ * will be owned by this class too.
  *
  * <p>Deliberately free of {@code net.minecraft} imports: the tick rate manager state arrives as
  * primitives through {@link #onTickRateState(boolean, boolean, float)}, so the whole state object
@@ -24,14 +26,18 @@ import com.tickpilot.metrics.TickMetricsSnapshot;
  * Tick measurement is written from the server thread only. The status command reads from the
  * command dispatcher. The kill switch is {@code volatile} because it is the one flag both sides
  * act on; the measurement fields are plain, since a marginally stale status readout is harmless
- * and the tick path must stay barrier-free (SPEC INV-6).
+ * and the tick path must stay barrier-free (SPEC INV-6). The config and the budget are
+ * {@code volatile} because {@code /tickpilot reload} replaces them while the tick loop is reading
+ * them, and a torn read of a reference is the one thing that would not merely be stale.
  */
 public final class TickPilotServerState {
 	private static final long NANOS_PER_MILLI = 1_000_000L;
 
 	private final long startedAtNanos;
 	private final TickMetrics metrics = new TickMetrics();
-	private final TickBudget budget;
+
+	private volatile TickPilotConfig config;
+	private volatile TickBudget budget;
 
 	private volatile boolean disabled;
 
@@ -39,9 +45,17 @@ public final class TickPilotServerState {
 	private boolean tickRateNormal = true;
 	private float tickRate = 20.0f;
 
-	TickPilotServerState(long startedAtNanos) {
+	TickPilotServerState(long startedAtNanos, TickPilotConfig config) {
 		this.startedAtNanos = startedAtNanos;
-		this.budget = new TickBudget(startedAtNanos / NANOS_PER_MILLI);
+		this.config = config;
+		this.budget = newBudget(config, startedAtNanos / NANOS_PER_MILLI);
+	}
+
+	private static TickBudget newBudget(TickPilotConfig config, long nowMillis) {
+		// FR-15 defines target and critical only; the hysteresis margin and the minimum hold time
+		// are not config keys, so they keep the TickBudget defaults rather than being invented here.
+		return new TickBudget(config.targetMspt(), config.criticalMspt(),
+				TickBudget.DEFAULT_HYSTERESIS_MSPT, TickBudget.DEFAULT_MIN_HOLD_MILLIS, nowMillis);
 	}
 
 	/**
@@ -60,6 +74,37 @@ public final class TickPilotServerState {
 	/** @return the load level state machine owned by this server (SPEC FR-5) */
 	public TickBudget budget() {
 		return budget;
+	}
+
+	/** @return the config snapshot this server is running on (SPEC FR-15) */
+	public TickPilotConfig config() {
+		return config;
+	}
+
+	/**
+	 * Swaps in a freshly loaded config (SPEC AC-15, {@code /tickpilot reload}). Called on the
+	 * server thread.
+	 *
+	 * <p>The {@link TickBudget} is rebuilt only when a threshold actually moved. Rebuilding it
+	 * unconditionally would drop the current load level back to NORMAL on every reload, which
+	 * would be a lie about the state of the server for the next few seconds.
+	 *
+	 * @param config    the new snapshot
+	 * @param nowMillis current wall clock, used as the start of the hold period if a rebuild happens
+	 * @return {@code true} if the thresholds changed and the load level was reset
+	 */
+	public boolean reconfigure(TickPilotConfig config, long nowMillis) {
+		TickBudget current = this.budget;
+		boolean thresholdsChanged = config.targetMspt() != current.targetMspt()
+				|| config.criticalMspt() != current.criticalMspt();
+
+		this.config = config;
+
+		if (thresholdsChanged) {
+			this.budget = newBudget(config, nowMillis);
+		}
+
+		return thresholdsChanged;
 	}
 
 	/** @return the load level currently held */

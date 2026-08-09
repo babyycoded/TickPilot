@@ -1,5 +1,7 @@
 package com.tickpilot;
 
+import com.tickpilot.config.TickPilotConfig;
+
 import net.minecraft.server.MinecraftServer;
 
 /**
@@ -26,10 +28,11 @@ public final class ServerStateHolder {
 	 * Creates and stores fresh state for {@code server}, replacing anything previously stored
 	 * under the same instance.
 	 *
+	 * @param config the config snapshot this server runs on (SPEC FR-15)
 	 * @return the newly created state
 	 */
-	public static TickPilotServerState create(MinecraftServer server) {
-		return REGISTRY.create(server, key -> new TickPilotServerState(System.nanoTime()));
+	public static TickPilotServerState create(MinecraftServer server, TickPilotConfig config) {
+		return REGISTRY.create(server, key -> new TickPilotServerState(System.nanoTime(), config));
 	}
 
 	/**
