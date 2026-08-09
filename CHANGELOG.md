@@ -46,13 +46,36 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
 - **Player-facing strings are ASCII only.** An em dash in the `status` header rendered as `ΓÇö`
   on a Windows console running a legacy code page. `LangFileAsciiTest` fails the build if a
   non-ASCII character reappears in `en_us.json`.
+- **p95/p99 were computed over the whole ring buffer**, so one burst of slow ticks kept them
+  elevated until it was evicted — five minutes at 20 TPS. The cross-check made it visible:
+  TickPilot read p95 3.47 ms where vanilla read 0.3 ms over its 100-tick window, because the
+  spawn-chunk generation from server startup was still in the buffer. Startup was only the most
+  visible case; an autosave, a player joining or a `/reload` did the same at any point in a
+  server's life. Percentiles now come in two windows — 1 min for "how is it now", whole history
+  for "how bad has it been" — and `TickMetricsSnapshot` carries both so `explain` (FR-13) can
+  contrast them. `max` keeps the full history, as AC-13 requires, and is now printed with the
+  age of the outlier instead of as a bare number that looks current.
+- **Window labels report the interval actually held.** The ring buffer is bounded by sample
+  count, so 6000 samples is five minutes only at a full 20 TPS, and less than that until it
+  fills. `status` no longer prints a nominal `(last 5 min)`; a server up for forty seconds says
+  `(last 40s)`. Recorded as §13 entry #9.
 
 Cross-checked against vanilla `/tick query` on a dedicated server (`./gradlew runServer`, idle
 world, three samples): TPS reads 20.00 where it previously read 19.80, and average MSPT agrees
 with vanilla within the one decimal vanilla prints (0.28 / 0.26 / 0.20 against 0.2 / 0.3 / 0.2).
 In one sample both reported the same outlier — vanilla P99 8.2 ms, TickPilot p99 8.15 ms.
-Note that vanilla reports no TPS at all, and its percentiles cover the last 100 ticks while
-TickPilot's cover 5 minutes, so only the averages are directly comparable.
+Note that vanilla reports no TPS at all, and its percentiles cover the last 100 ticks, so only
+the averages were directly comparable — the percentile window mismatch is what led to the fix
+below.
+
+Verified again on a dedicated server after the percentile change. At 35 s of uptime the label
+reported the real span (`p95 2.02, p99 10.25 (last 35s)`) rather than a nominal window. At
+1 m 45 s the two windows separated as intended: `p95 0.13, p99 0.20 (last 1m 00s)` next to
+`max 128.89, 1m 45s ago; p95 0.89, p99 3.24 (history: 1m 45s)` — the startup burst is dated and
+out of the short window while remaining explainable. Vanilla, queried two seconds later, read
+`P95: 0.1ms P99: 2.1ms, sample: 100`: p95 agrees, and the P99 gap is the 100-sample rank
+resolution the 1 min window exists to avoid (vanilla's P99 is the second-slowest of a hundred
+ticks, TickPilot's is the thirteenth-slowest of twelve hundred).
 
 #### Not implemented / deferred
 

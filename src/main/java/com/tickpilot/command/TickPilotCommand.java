@@ -65,7 +65,7 @@ public final class TickPilotCommand {
 			LoadLevel level = budget.level();
 
 			source.sendSuccess(() -> Component.translatable("command.tickpilot.status.header",
-					metrics.totalTicks(), formatUptime(metrics.uptimeNanos())), false);
+					metrics.totalTicks(), formatDuration(metrics.uptimeNanos())), false);
 
 			source.sendSuccess(() -> Component.translatable("command.tickpilot.status.tps",
 					Component.literal(format(metrics.tps())).withStyle(tpsColour(metrics.tps()))), false);
@@ -74,8 +74,17 @@ public final class TickPilotCommand {
 					format(metrics.lastMspt()), format(metrics.avgMspt5s()),
 					format(metrics.avgMspt1m()), format(metrics.avgMspt5m())), false);
 
+			// Two windows, deliberately. The short one says whether the server is struggling now;
+			// the max line says what the worst moment was and when, so an outlier that is already
+			// over is dated rather than left looking current (SPEC AC-1, AC-13).
 			source.sendSuccess(() -> Component.translatable("command.tickpilot.status.percentiles",
-					format(metrics.p95Mspt()), format(metrics.p99Mspt()), format(metrics.maxMspt())), false);
+					format(metrics.p95Mspt1m()), format(metrics.p99Mspt1m()),
+					formatDuration(metrics.shortPercentileSpanNanos())), false);
+
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.status.max",
+					format(metrics.maxMspt()), formatDuration(metrics.maxAgeNanos()),
+					format(metrics.p95MsptHistory()), format(metrics.p99MsptHistory()),
+					formatDuration(metrics.retainedSpanNanos())), false);
 
 			source.sendSuccess(() -> Component.translatable("command.tickpilot.status.load",
 					Component.translatable(level.translationKey()).withStyle(levelColour(level)),
@@ -107,7 +116,7 @@ public final class TickPilotCommand {
 	}
 
 	/** Formats a duration as {@code 1h 12m 30s}, dropping leading units that are zero. */
-	private static String formatUptime(long nanos) {
+	private static String formatDuration(long nanos) {
 		long seconds = TimeUnit.NANOSECONDS.toSeconds(Math.max(0L, nanos));
 		long hours = seconds / 3600L;
 		long minutes = seconds % 3600L / 60L;
