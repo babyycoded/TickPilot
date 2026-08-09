@@ -33,6 +33,15 @@ dependencies {
 
 	// Fabric API. This is technically optional, but you probably want it anyway.
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	// Unit tests — JUnit 5, see SPEC.md §13 entry #2.
+	// The test targets (.metrics, .budget, .scheduler, .config, .zones) are plain Java
+	// with no net.minecraft imports, so no mocking framework is needed.
+	testImplementation platform("org.junit:junit-bom:5.11.4")
+	testImplementation "org.junit.jupiter:junit-jupiter"
+	// Gradle 9 no longer puts the JUnit Platform launcher on the test runtime classpath
+	// implicitly; it must be declared. Version comes from the BOM above.
+	testRuntimeOnly "org.junit.platform:junit-platform-launcher"
 }
 
 processResources {
@@ -46,6 +55,10 @@ processResources {
 
 tasks.withType(JavaCompile).configureEach {
 	it.options.release = 21
+}
+
+test {
+	useJUnitPlatform()
 }
 
 java {

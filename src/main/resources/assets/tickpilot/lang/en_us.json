@@ -1,0 +1,5 @@
+{
+	"command.tickpilot.status.no_metrics": "TickPilot active, no metrics yet",
+	"command.tickpilot.status.unavailable": "TickPilot is not active on this server",
+	"command.tickpilot.error": "TickPilot hit an internal error; see the server log"
+}
