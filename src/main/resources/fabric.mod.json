@@ -3,15 +3,11 @@
 	"id": "tickpilot",
 	"version": "${version}",
 	"name": "TickPilot",
-	"description": "This is an example description! Tell everyone what your mod is about!",
+	"description": "Measures server tick cost, explains it in plain language, and cautiously throttles optional work.",
 	"authors": [
-		"Me!"
+		"babycoded"
 	],
-	"contact": {
-		"homepage": "https://fabricmc.net/",
-		"sources": "https://github.com/FabricMC/fabric-example-mod"
-	},
-	"license": "CC0-1.0",
+	"license": "MIT",
 	"icon": "assets/tickpilot/icon.png",
 	"environment": "*",
 	"entrypoints": {
