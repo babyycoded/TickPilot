@@ -89,11 +89,14 @@ public final class TickPilotServerState {
 	 * unconditionally would drop the current load level back to NORMAL on every reload, which
 	 * would be a lie about the state of the server for the next few seconds.
 	 *
-	 * @param config    the new snapshot
-	 * @param nowMillis current wall clock, used as the start of the hold period if a rebuild happens
+	 * @param config   the new snapshot
+	 * @param nowNanos {@link System#nanoTime()}, used as the start of the hold period if a rebuild
+	 *                 happens. Nanos and not {@code currentTimeMillis()}: every other clock value
+	 *                 in this class comes from {@code nanoTime()}, and feeding the budget a value
+	 *                 from a different epoch would make its hold-time arithmetic nonsense.
 	 * @return {@code true} if the thresholds changed and the load level was reset
 	 */
-	public boolean reconfigure(TickPilotConfig config, long nowMillis) {
+	public boolean reconfigure(TickPilotConfig config, long nowNanos) {
 		TickBudget current = this.budget;
 		boolean thresholdsChanged = config.targetMspt() != current.targetMspt()
 				|| config.criticalMspt() != current.criticalMspt();
@@ -101,7 +104,7 @@ public final class TickPilotServerState {
 		this.config = config;
 
 		if (thresholdsChanged) {
-			this.budget = newBudget(config, nowMillis);
+			this.budget = newBudget(config, nowNanos / NANOS_PER_MILLI);
 		}
 
 		return thresholdsChanged;
