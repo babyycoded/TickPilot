@@ -32,6 +32,28 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
   `target + 25 %`, which at the default 40/50 collapsed HIGH to an unreachable empty band.
   §13 entry #7.
 
+#### Fixed during manual verification of Phase 3
+
+- **TPS was permanently 19.80 on a healthy server.** The rate was computed as "samples whose end
+  timestamp falls in the last 5 s, divided by 5 s". `/tickpilot status` runs inside
+  `tickChildren`, so the tick in progress has not recorded its end yet: a 5 s window crosses 100
+  tick boundaries but contains only 99 recorded ends, and the fixed divisor quantised the answer
+  to steps of 0.2 TPS. The result was 19.80 regardless of load. TPS is now the mean interval
+  between recorded tick ends — `(n - 1)` periods divided by the time they span — which does not
+  depend on where the window boundary falls. Time waiting for an overdue tick is folded in after
+  a two-period grace, so stalls are still visible. Five regression tests, including a sweep of
+  every query phase within a tick.
+- **Player-facing strings are ASCII only.** An em dash in the `status` header rendered as `ΓÇö`
+  on a Windows console running a legacy code page. `LangFileAsciiTest` fails the build if a
+  non-ASCII character reappears in `en_us.json`.
+
+Cross-checked against vanilla `/tick query` on a dedicated server (`./gradlew runServer`, idle
+world, three samples): TPS reads 20.00 where it previously read 19.80, and average MSPT agrees
+with vanilla within the one decimal vanilla prints (0.28 / 0.26 / 0.20 against 0.2 / 0.3 / 0.2).
+In one sample both reported the same outlier — vanilla P99 8.2 ms, TickPilot p99 8.15 ms.
+Note that vanilla reports no TPS at all, and its percentiles cover the last 100 ticks while
+TickPilot's cover 5 minutes, so only the averages are directly comparable.
+
 #### Not implemented / deferred
 
 - **Thresholds are not configurable yet** — `TickBudget` takes target, critical, hysteresis and

@@ -116,12 +116,106 @@ class TickMetricsTest {
 	}
 
 	@Test
-	void tpsUsesRealUptimeBeforeTheFirstWindowHasElapsed() {
+	void tpsIsExactBeforeTheFirstWindowHasElapsed() {
 		TickMetrics metrics = new TickMetrics();
 		// Only 400 ms of history: dividing by the nominal 5 s window would report 1.6 TPS.
 		long now = recordSteady(metrics, 8, 50.0, 1.0);
 
 		assertEquals(20.0, metrics.tps(now), 1.0e-6);
+	}
+
+	@Test
+	void tpsIsTwentyWhenQueriedFromInsideTheRunningTick() {
+		// Regression, found in manual testing: /tickpilot status runs inside tickChildren, so the
+		// current tick has not recorded its end yet. Counting ends inside a fixed 5 s window then
+		// finds 99 of them instead of 100 and reports a permanent 19.80 on a healthy server.
+		TickMetrics metrics = new TickMetrics();
+
+		for (int i = 0; i < 400; i++) {
+			long start = ms(50) * i;
+			metrics.onTickStart(start);
+			metrics.onTickEnd(start + ms(0.3));
+		}
+
+		// Tick 400 is in flight; the command executes 0.3 ms into it.
+		long tickStart = ms(50) * 400;
+		metrics.onTickStart(tickStart);
+
+		assertEquals(20.0, metrics.tps(tickStart + ms(0.3)), 1.0e-6);
+	}
+
+	@Test
+	void tpsDoesNotDependOnWhereInTheTickItIsQueried() {
+		TickMetrics metrics = new TickMetrics();
+		long lastEnd = 0L;
+
+		for (int i = 0; i < 400; i++) {
+			long start = ms(50) * i;
+			metrics.onTickStart(start);
+			lastEnd = start + ms(0.3);
+			metrics.onTickEnd(lastEnd);
+		}
+
+		// The old formula quantised the answer to multiples of 0.2 TPS and dropped a step
+		// depending on where the window boundary fell. Sweep a whole tick period: every phase
+		// must give the same answer.
+		for (double offsetMillis = 0.0; offsetMillis < 50.0; offsetMillis += 0.5) {
+			assertEquals(20.0, metrics.tps(lastEnd + ms(offsetMillis)), 1.0e-6,
+					"queried " + offsetMillis + " ms after the last tick");
+		}
+	}
+
+	@Test
+	void tpsIsUnaffectedByHowLongTheTicksThemselvesTake() {
+		// An idle server and a busy one that both keep the schedule run at the same rate: TPS
+		// saturates at 20 while MSPT still has 49 ms of headroom. This is why SPEC §2 makes MSPT
+		// the primary metric, and the test pins the property rather than assuming it.
+		TickMetrics idle = new TickMetrics();
+		TickMetrics busy = new TickMetrics();
+
+		long idleNow = recordSteady(idle, 200, 50.0, 0.1);
+		long busyNow = recordSteady(busy, 200, 50.0, 40.0);
+
+		assertEquals(20.0, idle.tps(idleNow), 1.0e-6);
+		assertEquals(20.0, busy.tps(busyNow), 1.0e-6);
+		assertEquals(0.1, idle.averageMspt5s(idleNow), EPSILON);
+		assertEquals(40.0, busy.averageMspt5s(busyNow), EPSILON);
+	}
+
+	@Test
+	void tpsDegradesWhileTheNextTickIsOverdue() {
+		TickMetrics metrics = new TickMetrics();
+		long lastEnd = 0L;
+
+		for (int i = 0; i < 100; i++) {
+			long start = ms(50) * i;
+			metrics.onTickStart(start);
+			lastEnd = start + ms(1);
+			metrics.onTickEnd(lastEnd);
+		}
+
+		// Inside the grace period the server is simply mid-tick, not late.
+		assertEquals(20.0, metrics.tps(lastEnd + ms(99)), 1.0e-6);
+
+		// After a 3 s stall the 5 s window still holds 40 samples: 39 periods spanning 1950 ms,
+		// plus 2900 ms of wait beyond the two-period grace.
+		double stalled = metrics.tps(lastEnd + ms(3000));
+		assertEquals(39.0 / 4.85, stalled, 1.0e-6);
+		assertTrue(stalled > 7.0 && stalled < 9.0, "a 3 s stall must be clearly visible");
+	}
+
+	@Test
+	void tpsNeedsTwoSamplesBeforeItMeansAnything() {
+		TickMetrics metrics = new TickMetrics();
+		metrics.onTickStart(0L);
+		metrics.onTickEnd(ms(1));
+
+		assertEquals(0.0, metrics.tps(ms(2)), EPSILON, "one tick describes no interval");
+
+		metrics.onTickStart(ms(50));
+		metrics.onTickEnd(ms(51));
+
+		assertEquals(20.0, metrics.tps(ms(52)), 1.0e-6);
 	}
 
 	@Test

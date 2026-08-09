@@ -18,6 +18,16 @@ in the game is throttled or changed.
 
 TickPilot treats MSPT as the primary metric and derives the load level from it.
 
+A concrete consequence worth knowing before you read the output: **TPS cannot tell a quiet server
+from a busy one that is still keeping up.** An empty world at 0.1 ms per tick and the same world
+with sixty zombies at 0.4 ms per tick both report 20.00, because in both cases the server spends
+the rest of the 50 ms waiting. TPS only starts moving once MSPT passes 50 ms, at which point you
+are already lagging. MSPT tells you how much headroom is left; TPS tells you it is gone.
+
+TickPilot measures TPS as the mean interval between ticks over the last five seconds, not as a
+count of ticks inside a fixed window — a count is off by exactly one tick when the command runs
+mid-tick, which reads as a permanent 19.80 on a perfectly healthy server.
+
 ## Commands
 
 | Command | Permission | What it does |
