@@ -3,6 +3,8 @@ package com.tickpilot;
 import java.util.Locale;
 
 import com.tickpilot.budget.LoadLevelTransition;
+import com.tickpilot.profiler.TickCategory;
+import com.tickpilot.profiler.TickProfiler;
 
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 
@@ -61,6 +63,55 @@ final class TickPilotTickListener {
 		}
 	}
 
+	/**
+	 * Writes the SPEC AC-4 end-of-session report to the server log: one block of lines, once,
+	 * which is well inside what AC-16 allows.
+	 *
+	 * <p>Only the category totals. The per-type top-N stays behind {@code /tickpilot top entities}
+	 * so that a finished session does not dump fifty lines into the console unasked.
+	 */
+	private static void logProfilingReport(TickPilotServerState state) {
+		TickProfiler profiler = state.profiler();
+		long ticks = profiler.sessionTicks();
+
+		if (ticks == 0L) {
+			TickPilot.LOGGER.info("Profiling session finished with no ticks measured");
+			return;
+		}
+
+		double total = msptPerTick(profiler.sessionNanos(TickCategory.TOTAL), ticks);
+		TickPilot.LOGGER.info("Profiling session finished: {} ticks, {} ms/tick total", ticks,
+				String.format(Locale.ROOT, "%.2f", total));
+
+		for (TickCategory category : TickCategory.all()) {
+			if (category == TickCategory.TOTAL) {
+				continue;
+			}
+
+			if (category != TickCategory.OTHER && !profiler.isAvailable(category)) {
+				TickPilot.LOGGER.info("  {}: n/a", category);
+				continue;
+			}
+
+			double mspt = msptPerTick(profiler.sessionNanos(category), ticks);
+			TickPilot.LOGGER.info("  {}: {} ms/tick ({}%)", category,
+					String.format(Locale.ROOT, "%.2f", mspt),
+					String.format(Locale.ROOT, "%.1f", total > 0.0 ? mspt / total * 100.0 : 0.0));
+		}
+
+		if (!profiler.isConsistent()) {
+			TickPilot.LOGGER.warn("  these numbers are not trustworthy: dropped={} unbalanced={} "
+					+ "abandoned={} overrun={}", profiler.droppedFrames(), profiler.unbalancedEnds(),
+					profiler.abandonedFrames(), profiler.overrunTicks());
+		}
+
+		TickPilot.LOGGER.info("  run /tickpilot top entities or top blockentities for the breakdown");
+	}
+
+	private static double msptPerTick(long nanos, long ticks) {
+		return ticks <= 0L ? 0.0 : (double) nanos / ticks / 1_000_000.0;
+	}
+
 	private static void onEndTick(MinecraftServer server) {
 		TickPilotServerState state = ServerStateHolder.get(server);
 
@@ -74,7 +125,15 @@ final class TickPilotTickListener {
 			ServerTickRateManager tickRate = server.tickRateManager();
 			state.onTickRateState(tickRate.isFrozen(), tickRate.runsNormally(), tickRate.tickrate());
 
-			LoadLevelTransition transition = state.onTickEnd(System.nanoTime());
+			long nowNanos = System.nanoTime();
+			LoadLevelTransition transition = state.onTickEnd(nowNanos);
+
+			// SPEC AC-4: a timed session prints its report when it runs out. To the log, because
+			// the player who started it may well have logged off by now, and because the console
+			// is where an operator profiling a dedicated server is looking anyway.
+			if (state.profilingJustExpired(nowNanos)) {
+				logProfilingReport(state);
+			}
 
 			if (transition != null) {
 				// SPEC AC-5 / AC-16: one line per transition, never per tick.

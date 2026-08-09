@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.tickpilot.ServerStateHolder;
 import com.tickpilot.TickPilot;
 import com.tickpilot.TickPilotServerState;
@@ -78,7 +79,72 @@ public final class TickPilotCommand {
 								.executes(context -> topTypes(context.getSource(), TickCategory.ENTITIES)))
 						.then(Commands.literal("blockentities")
 								.executes(context -> topTypes(context.getSource(),
-										TickCategory.BLOCK_ENTITIES)))));
+										TickCategory.BLOCK_ENTITIES))))
+				.then(Commands.literal("profile")
+						.requires(source -> source.hasPermission(2))
+						.then(Commands.literal("stop")
+								.executes(context -> profileStop(context.getSource())))
+						// SPEC FR-12 bounds the session at 1..300 s. Brigadier rejects anything else
+						// with its own message, which is AC-12's "understandable error, not an
+						// exception" for free.
+						.then(Commands.argument("seconds", IntegerArgumentType.integer(1, 300))
+								.executes(context -> profileStart(context.getSource(),
+										IntegerArgumentType.getInteger(context, "seconds"))))));
+	}
+
+	private static int profileStart(CommandSourceStack source, int seconds) {
+		try {
+			TickPilotServerState state = ServerStateHolder.get(source.getServer());
+
+			if (state == null || state.isDisabled()) {
+				source.sendFailure(Component.translatable("command.tickpilot.status.unavailable"));
+				return 0;
+			}
+
+			// AC-4: starting twice is a message, never a crash.
+			if (!state.startProfiling(seconds, System.nanoTime())) {
+				source.sendFailure(Component.translatable("command.tickpilot.profile.already_running",
+						state.profilingSecondsLeft(System.nanoTime())));
+				return 0;
+			}
+
+			TickPilot.LOGGER.info("Profiling session started for {}s", seconds);
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.profile.started",
+					seconds), true);
+			return 1;
+		} catch (Throwable t) {
+			TickPilot.LOGGER.error("/tickpilot profile failed", t);
+			source.sendFailure(Component.translatable("command.tickpilot.error"));
+			return 0;
+		}
+	}
+
+	private static int profileStop(CommandSourceStack source) {
+		try {
+			TickPilotServerState state = ServerStateHolder.get(source.getServer());
+
+			if (state == null || state.isDisabled()) {
+				source.sendFailure(Component.translatable("command.tickpilot.status.unavailable"));
+				return 0;
+			}
+
+			if (!state.stopProfiling()) {
+				source.sendFailure(Component.translatable("command.tickpilot.profile.not_running"));
+				return 0;
+			}
+
+			TickPilot.LOGGER.info("Profiling session stopped after {} ticks",
+					state.profiler().sessionTicks());
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.profile.stopped",
+					state.profiler().sessionTicks()), true);
+			// The data survives the stop, so show it straight away rather than making them ask.
+			top(source);
+			return 1;
+		} catch (Throwable t) {
+			TickPilot.LOGGER.error("/tickpilot profile stop failed", t);
+			source.sendFailure(Component.translatable("command.tickpilot.error"));
+			return 0;
+		}
 	}
 
 	/**
