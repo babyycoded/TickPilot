@@ -35,6 +35,8 @@ mid-tick, which reads as a permanent 19.80 on a perfectly healthy server.
 | `/tickpilot status` | everyone | TPS, MSPT (last / 5 s / 1 min / 5 min averages, p95, p99, max), load level, uptime |
 | `/tickpilot reload` | level 2 | Re-reads `config/tickpilot.toml` and reports what it accepted |
 | `/tickpilot top` | level 2 | Tick cost split by category |
+| `/tickpilot top entities` | level 2 | Costliest entity types, and the mods they belong to |
+| `/tickpilot top blockentities` | level 2 | Costliest block entity types |
 
 Example output:
 
@@ -86,6 +88,18 @@ Tick cost over 402 ticks, 12.32 ms/tick total
   RANDOM_TICKS: 0.26 ms/tick (2.1%)     BLOCK_ENTITIES: 0.05 ms/tick (0.4%)
   SAVING: 0.00 ms/tick (0.0%)           OTHER: 0.33 ms/tick (2.6%)
 ```
+
+```
+/tickpilot top entities
+Top Entities over 10 of 12 types, 402 ticks:
+  minecraft:zombie: 6.39 ms/tick, 377.00 instances, 17.0 us each
+  minecraft:item: 0.32 ms/tick, 93.18 instances, 3.4 us each
+  minecraft:turtle: 0.10 ms/tick, 2.24 instances, 46.7 us each
+```
+
+Three numbers per row, because the total alone misleads: 377 zombies at 17 microseconds each cost
+far more than two turtles at 47, but it is the turtle that is expensive *per animal*. The instance
+count is instances actually ticked per tick, not instances loaded.
 
 ### Reading the categories honestly
 
