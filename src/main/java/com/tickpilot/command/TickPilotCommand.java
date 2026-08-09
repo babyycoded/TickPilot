@@ -1,7 +1,10 @@
 package com.tickpilot.command;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import com.mojang.brigadier.CommandDispatcher;
@@ -14,6 +17,7 @@ import com.tickpilot.config.ConfigLoadResult;
 import com.tickpilot.config.ConfigLoader;
 import com.tickpilot.metrics.TickMetrics;
 import com.tickpilot.metrics.TickMetricsSnapshot;
+import com.tickpilot.profiler.CostTracker;
 import com.tickpilot.profiler.TickCategory;
 import com.tickpilot.profiler.TickProfiler;
 
@@ -22,7 +26,11 @@ import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.level.block.entity.BlockEntityType;
 
 /**
  * Owns the {@code /tickpilot} command tree (SPEC FR-12).
@@ -36,6 +44,9 @@ public final class TickPilotCommand {
 	 * the log. A config with fifty typos would otherwise scroll the operator's chat away.
 	 */
 	private static final int MAX_PROBLEMS_SHOWN = 8;
+
+	/** How many types /tickpilot top entities|blockentities lists (SPEC AC-3 top-N). */
+	private static final int TOP_N = 10;
 
 	private static final long NANOS_PER_MILLI = 1_000_000L;
 
@@ -62,7 +73,116 @@ public final class TickPilotCommand {
 						.executes(context -> reload(context.getSource())))
 				.then(Commands.literal("top")
 						.requires(source -> source.hasPermission(2))
-						.executes(context -> top(context.getSource()))));
+						.executes(context -> top(context.getSource()))
+						.then(Commands.literal("entities")
+								.executes(context -> topTypes(context.getSource(), TickCategory.ENTITIES)))
+						.then(Commands.literal("blockentities")
+								.executes(context -> topTypes(context.getSource(),
+										TickCategory.BLOCK_ENTITIES)))));
+	}
+
+	/**
+	 * Prints the costliest types in a category, plus the costliest mod namespaces (SPEC FR-3,
+	 * AC-3).
+	 *
+	 * <p>Registry lookups and string building happen here, on the command path, and never in the
+	 * tick loop: {@code CostTracker} keeps the registry objects themselves as keys precisely so
+	 * that turning them into names costs nothing per tick (SPEC INV-6).
+	 */
+	private static int topTypes(CommandSourceStack source, TickCategory category) {
+		try {
+			TickPilotServerState state = ServerStateHolder.get(source.getServer());
+
+			if (state == null || state.isDisabled()) {
+				source.sendFailure(Component.translatable("command.tickpilot.status.unavailable"));
+				return 0;
+			}
+
+			TickProfiler profiler = state.profiler();
+
+			if (profiler.sessionTicks() == 0L) {
+				source.sendSuccess(() -> Component.translatable("command.tickpilot.top.no_session"), false);
+				return 1;
+			}
+
+			List<CostTracker.TypeCost> rows = state.costs().top(category, TOP_N);
+
+			if (rows.isEmpty()) {
+				source.sendSuccess(() -> Component.translatable("command.tickpilot.top.types.empty",
+						Component.translatable(category.translationKey())), false);
+				return 1;
+			}
+
+			long ticks = profiler.sessionTicks();
+
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.top.types.header",
+					Component.translatable(category.translationKey()), rows.size(),
+					state.costs().trackedTypes(category), ticks), false);
+
+			for (CostTracker.TypeCost row : rows) {
+				ResourceLocation id = idOf(category, row.key());
+				// Instances actually ticked per tick, which is what AC-3 means by "count": a type
+				// with 400 entities loaded but 20 in range is costing you 20.
+				double perTick = (double) row.invocations() / ticks;
+
+				source.sendSuccess(() -> Component.translatable("command.tickpilot.top.types.row",
+						id == null ? "unregistered" : id.toString(),
+						format(toMsptPerTick(row.totalNanos(), ticks)),
+						format(perTick),
+						formatMicros(row.averageNanos())), false);
+			}
+
+			sendModBreakdown(source, category, rows, ticks);
+			return 1;
+		} catch (Throwable t) {
+			TickPilot.LOGGER.error("/tickpilot top {} failed", category, t);
+			source.sendFailure(Component.translatable("command.tickpilot.error"));
+			return 0;
+		}
+	}
+
+	/** Groups the rows by namespace, which is the mod ID breakdown FR-3 asks for. */
+	private static void sendModBreakdown(CommandSourceStack source, TickCategory category,
+			List<CostTracker.TypeCost> rows, long ticks) {
+		Map<String, Long> byNamespace = new LinkedHashMap<>();
+
+		for (CostTracker.TypeCost row : rows) {
+			ResourceLocation id = idOf(category, row.key());
+			String namespace = id == null ? "unregistered" : id.getNamespace();
+			byNamespace.merge(namespace, row.totalNanos(), Long::sum);
+		}
+
+		if (byNamespace.size() < 2) {
+			// One namespace is not a breakdown, it is the same line again.
+			return;
+		}
+
+		List<Map.Entry<String, Long>> sorted = new ArrayList<>(byNamespace.entrySet());
+		sorted.sort(Map.Entry.<String, Long>comparingByValue().reversed());
+
+		source.sendSuccess(() -> Component.translatable("command.tickpilot.top.mods.header"), false);
+
+		for (Map.Entry<String, Long> entry : sorted) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.top.mods.row",
+					entry.getKey(), format(toMsptPerTick(entry.getValue(), ticks))), false);
+		}
+	}
+
+	private static ResourceLocation idOf(TickCategory category, Object key) {
+		if (category == TickCategory.ENTITIES && key instanceof EntityType<?> type) {
+			return BuiltInRegistries.ENTITY_TYPE.getKey(type);
+		}
+
+		if (category == TickCategory.BLOCK_ENTITIES && key instanceof BlockEntityType<?> type) {
+			return BuiltInRegistries.BLOCK_ENTITY_TYPE.getKey(type);
+		}
+
+		return null;
+	}
+
+	/** Per-instance costs are microseconds, not milliseconds; printing ms would be all zeroes. */
+	private static String formatMicros(double nanos) {
+		return String.format(Locale.ROOT, "%.1f", nanos / 1_000.0);
 	}
 
 	/**

@@ -22,6 +22,10 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
   constructor and reused for the life of the server.
   `TickProfilerTest.theFrameStackIsAllocatedOnceAndReused` reads them back through reflection
   after 100 ticks × 500 entities × 2 nesting levels and fails the build on reallocation.
+- `com.tickpilot.profiler.CostTracker` — per-type aggregation for FR-3. One `long[2]` per type,
+  created the first time that type is seen and updated in place after that; identity-keyed,
+  because `EntityType` and `BlockEntityType` are registry singletons. Registry lookups and string
+  building happen on the command path, never in the tick loop.
 - **Seven Mixins**, all with the MX-2 Javadoc block, every target verified against
   `mappings.tiny` *and* `javap` on the jar the project compiles against:
 
@@ -54,12 +58,13 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
   render thread through the same Mixins cannot corrupt the server's stack (INV-1). Cleared at
   every tick end and at shutdown, so nothing survives a world (INV-7).
 - `/tickpilot top` prints the category split; a category with no injection point prints `n/a`,
-  never `0.00` (AC-2). Deep profiling is driven by `sampling_enabled` for now; the command that
-  starts a timed session arrives with FR-4.
-- 20 new unit tests, none of which launch Minecraft; suite total 144.
+  never `0.00` (AC-2). `top entities` and `top blockentities` add the costliest types with their
+  instance counts and per-instance averages, grouped by mod namespace (AC-3). Deep profiling is
+  driven by `sampling_enabled` for now; the command that starts a timed session arrives with FR-4.
+- 29 new unit tests, none of which launch Minecraft; suite total 153.
 - **SPEC changes:** MX-3 now forbids `@Redirect` as well as `@Overwrite` (§13 entry #12);
   `RANDOM_TICKS` is displayed as "Chunk environment" because its only safe measurement point is
-  wider than its name (§13 entry #13).
+  wider than its name (§13 entry #13); AC-3 coordinates deferred (§13 entry #14).
 
 #### Verified under load, with Lithium installed
 
@@ -76,15 +81,19 @@ Profiling session finished: 402 ticks, 12.32 ms/tick total
 The AC-2 check that an idle server cannot give: the eight categories sum to **100.00 %** of TOTAL
 with `OTHER` at only 2.6 %, and every self-check counter stayed at zero — no double counting, no
 overrun, nothing dropped. `RANDOM_TICKS` is non-zero here because chunk environment ticking needs
-a player within spawning range, which is why it reads 0.00 on an empty server.
+a player within spawning range, which is why it reads 0.00 on an empty server. The per-type
+numbers reconcile with the category: the ten listed entity types add up to 7.88 ms/tick against an
+`ENTITIES` total of 7.93, the remainder being the two types outside the top 10.
 
 #### Not implemented / deferred
 
+- **Coordinates for expensive block entities** — AC-3 also asks for positions kept in a bounded
+  top-N buffer during a session. Only type-level aggregation is implemented. §13 entry #14.
 - **Chunk sending to players is in `OTHER`** — deliberate, documented in the README and in
   `ServerConnectionListenerMixin`.
 - **No load test beyond a single machine** — the Lithium run above is one server, one client, one
   mod. Behaviour in a hundred-mod pack is argued from Lithium's source, not measured.
-- **Per-type top-N (FR-3) and the timed session command (FR-4)** — next, in their own commits.
+- **The timed session command (FR-4)** — next, in its own commit.
 - **The mod's own overhead (INV-10, FR-12)** — not measured yet; its own commit.
 
 ### Phase 4 — configuration (FR-15, AC-15)

@@ -6,6 +6,7 @@ import com.tickpilot.budget.TickBudget;
 import com.tickpilot.config.TickPilotConfig;
 import com.tickpilot.metrics.TickMetrics;
 import com.tickpilot.metrics.TickMetricsSnapshot;
+import com.tickpilot.profiler.CostTracker;
 import com.tickpilot.profiler.ProfilerHook;
 import com.tickpilot.profiler.TickCategory;
 import com.tickpilot.profiler.TickProfiler;
@@ -39,6 +40,7 @@ public final class TickPilotServerState {
 	private final long startedAtNanos;
 	private final TickMetrics metrics = new TickMetrics();
 	private final TickProfiler profiler = new TickProfiler();
+	private final CostTracker costs = new CostTracker();
 
 	private volatile TickPilotConfig config;
 	private volatile TickBudget budget;
@@ -57,7 +59,13 @@ public final class TickPilotServerState {
 		// FR-15 `sampling_enabled`: deep profiling from the first tick instead of waiting for
 		// /tickpilot profile. Off by default (INV-3).
 		this.profiler.setEnabled(config.samplingEnabled());
+		this.profiler.setCostSink(this.costs);
 		declareProfiledCategories(this.profiler);
+	}
+
+	/** @return the per-type cost aggregation owned by this server (SPEC FR-3) */
+	public CostTracker costs() {
+		return costs;
 	}
 
 	/**
@@ -273,6 +281,7 @@ public final class TickPilotServerState {
 		ProfilerHook.detach();
 		profiler.setEnabled(false);
 		profiler.resetSession();
+		costs.reset();
 		metrics.reset();
 	}
 }
