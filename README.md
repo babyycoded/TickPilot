@@ -63,6 +63,13 @@ The span in brackets is what the buffer actually holds, not a nominal figure. A 
 forty seconds says `(last 40s)`, because the buffer is bounded by sample count and five minutes
 of it only exists at a full 20 TPS.
 
+The three averages on the line above keep their fixed names, so a window the server has not been
+up long enough to fill reads `n/a` rather than quietly averaging less time than it claims:
+
+```
+MSPT: last 0.12, avg 5s 0.10, 1m 0.88, 5m n/a
+```
+
 ## Load levels
 
 Computed from the 5 s average MSPT. With the default budget (target 40 ms, critical 50 ms):

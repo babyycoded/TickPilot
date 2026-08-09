@@ -10,6 +10,7 @@
 	"command.tickpilot.status.frozen": "Game is frozen by /tick freeze - TPS and MSPT do not reflect server load",
 	"command.tickpilot.status.tickrate": "Target tick rate is set to %s/s by /tick rate - a TPS below 20 here is configured, not overload",
 	"command.tickpilot.error": "TickPilot hit an internal error; see the server log",
+	"tickpilot.value.unavailable": "n/a",
 	"tickpilot.load_level.normal": "NORMAL",
 	"tickpilot.load_level.elevated": "ELEVATED",
 	"tickpilot.load_level.high": "HIGH",

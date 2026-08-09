@@ -9,6 +9,7 @@ import com.tickpilot.TickPilot;
 import com.tickpilot.TickPilotServerState;
 import com.tickpilot.budget.LoadLevel;
 import com.tickpilot.budget.TickBudget;
+import com.tickpilot.metrics.TickMetrics;
 import com.tickpilot.metrics.TickMetricsSnapshot;
 
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -70,9 +71,14 @@ public final class TickPilotCommand {
 			source.sendSuccess(() -> Component.translatable("command.tickpilot.status.tps",
 					Component.literal(format(metrics.tps())).withStyle(tpsColour(metrics.tps()))), false);
 
+			// The average windows carry the fixed names AC-1 gives them, so a window the server has
+			// not lived through yet shows n/a rather than an average over less time than it claims
+			// (same choice as AC-2 makes for an unavailable profiling category).
 			source.sendSuccess(() -> Component.translatable("command.tickpilot.status.mspt",
-					format(metrics.lastMspt()), format(metrics.avgMspt5s()),
-					format(metrics.avgMspt1m()), format(metrics.avgMspt5m())), false);
+					format(metrics.lastMspt()),
+					windowed(metrics, metrics.avgMspt5s(), TickMetrics.WINDOW_5S_NANOS),
+					windowed(metrics, metrics.avgMspt1m(), TickMetrics.WINDOW_1M_NANOS),
+					windowed(metrics, metrics.avgMspt5m(), TickMetrics.WINDOW_5M_NANOS)), false);
 
 			// Two windows, deliberately. The short one says whether the server is struggling now;
 			// the max line says what the worst moment was and when, so an outlier that is already
@@ -113,6 +119,18 @@ public final class TickPilotCommand {
 	 */
 	private static String format(double value) {
 		return String.format(Locale.ROOT, "%.2f", value);
+	}
+
+	/**
+	 * @return the formatted value, or {@code n/a} when the server has not been up long enough for
+	 *         {@code windowNanos} to hold a full window of measurements
+	 */
+	private static Object windowed(TickMetricsSnapshot metrics, double value, long windowNanos) {
+		if (!metrics.covers(windowNanos)) {
+			return Component.translatable("tickpilot.value.unavailable").withStyle(ChatFormatting.GRAY);
+		}
+
+		return format(value);
 	}
 
 	/** Formats a duration as {@code 1h 12m 30s}, dropping leading units that are zero. */
