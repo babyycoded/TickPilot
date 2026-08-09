@@ -56,6 +56,15 @@ TickPilot's cover 5 minutes, so only the averages are directly comparable.
 
 #### Not implemented / deferred
 
+- **False CRITICAL on server startup — Phase 4, warm-up period.** The first tick after
+  `Done (…)!` genuinely costs ~120 ms (measured: 117.37 ms on an idle dedicated server), so every
+  start logs `Load level NORMAL -> CRITICAL` and then recovers to NORMAL about five seconds later.
+  The reading is truthful but useless: nothing is overloaded, the server is still warming up, and
+  one bogus critical line per start is noise that AC-16 exists to prevent. Deliberately not fixed
+  in Phase 3 — the fix changes `TickBudget` behaviour, and its thresholds move into the config
+  file in Phase 4 anyway. Fix it there, together with FR-15: hold the level at NORMAL until the
+  ring buffer holds a minimum number of samples (or a warm-up interval has passed) rather than
+  special-casing the first tick.
 - **Thresholds are not configurable yet** — `TickBudget` takes target, critical, hysteresis and
   hold time as constructor arguments and validates them, but the server wires in the SPEC defaults
   because the config file arrives with FR-15 in Phase 4.
