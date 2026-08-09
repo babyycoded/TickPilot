@@ -34,6 +34,8 @@ mid-tick, which reads as a permanent 19.80 on a perfectly healthy server.
 |---|---|---|
 | `/tickpilot status` | everyone | TPS, MSPT (last / 5 s / 1 min / 5 min averages, p95, p99, max), load level, uptime |
 | `/tickpilot reload` | level 2 | Re-reads `config/tickpilot.toml` and reports what it accepted |
+| `/tickpilot profile <1-300>` | level 2 | Runs a profiling session for that many seconds |
+| `/tickpilot profile stop` | level 2 | Ends the session early and prints the breakdown |
 | `/tickpilot top` | level 2 | Tick cost split by category |
 | `/tickpilot top entities` | level 2 | Costliest entity types, and the mods they belong to |
 | `/tickpilot top blockentities` | level 2 | Costliest block entity types |
@@ -76,13 +78,14 @@ MSPT: last 0.12, avg 5s 0.10, 1m 0.88, 5m n/a
 
 ## Where the tick goes
 
-Deep profiling is **off by default**, because the measurement itself is not free: with no session
-running, each hook costs one field read and a null check, and in particular no
-`System.nanoTime()` call. Turn it on with `sampling_enabled` in the config.
+Deep profiling is **off by default** and runs only for as long as you ask for it, because the
+measurement itself is not free: with no session running, each hook costs one field read and a null
+check, and in particular no `System.nanoTime()` call.
 
 ```
-/tickpilot top
-Tick cost over 402 ticks, 12.32 ms/tick total
+/tickpilot profile 20
+... twenty seconds later, in the server log ...
+Profiling session finished: 402 ticks, 12.32 ms/tick total
   ENTITIES: 7.93 ms/tick (64.4%)      CHUNK_OPS: 2.71 ms/tick (22.0%)
   SCHEDULED_TICKS: 0.57 ms/tick (4.7%)  NETWORK: 0.47 ms/tick (3.8%)
   RANDOM_TICKS: 0.26 ms/tick (2.1%)     BLOCK_ENTITIES: 0.05 ms/tick (0.4%)

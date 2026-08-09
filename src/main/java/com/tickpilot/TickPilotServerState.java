@@ -36,6 +36,7 @@ import com.tickpilot.profiler.TickProfiler;
  */
 public final class TickPilotServerState {
 	private static final long NANOS_PER_MILLI = 1_000_000L;
+	private static final long NANOS_PER_SECOND = 1_000_000_000L;
 
 	private final long startedAtNanos;
 	private final TickMetrics metrics = new TickMetrics();
@@ -46,6 +47,9 @@ public final class TickPilotServerState {
 	private volatile TickBudget budget;
 
 	private volatile boolean disabled;
+
+	private volatile boolean sessionActive;
+	private volatile long sessionEndNanos;
 
 	private boolean tickRateFrozen;
 	private boolean tickRateNormal = true;
@@ -59,6 +63,7 @@ public final class TickPilotServerState {
 		// FR-15 `sampling_enabled`: deep profiling from the first tick instead of waiting for
 		// /tickpilot profile. Off by default (INV-3).
 		this.profiler.setEnabled(config.samplingEnabled());
+		this.sessionActive = config.samplingEnabled();
 		this.profiler.setCostSink(this.costs);
 		declareProfiledCategories(this.profiler);
 	}
@@ -66,6 +71,79 @@ public final class TickPilotServerState {
 	/** @return the per-type cost aggregation owned by this server (SPEC FR-3) */
 	public CostTracker costs() {
 		return costs;
+	}
+
+	/** @return {@code true} while a profiling session is running (SPEC FR-4) */
+	public boolean isProfiling() {
+		return sessionActive;
+	}
+
+	/**
+	 * Starts a timed profiling session (SPEC FR-4, AC-4).
+	 *
+	 * <p>Clears whatever the last session collected, so a report is never a mix of two runs.
+	 *
+	 * @param seconds  how long to profile for
+	 * @param nowNanos {@link System#nanoTime()}
+	 * @return {@code false} if a session is already running; the caller turns that into a message
+	 *         rather than an exception (AC-4)
+	 */
+	public boolean startProfiling(int seconds, long nowNanos) {
+		if (sessionActive) {
+			return false;
+		}
+
+		costs.reset();
+		profiler.resetSession();
+		profiler.setEnabled(true);
+		sessionActive = true;
+		sessionEndNanos = nowNanos + seconds * NANOS_PER_SECOND;
+		return true;
+	}
+
+	/**
+	 * Ends a session early (SPEC AC-4). The data collected so far is kept, so {@code top} still
+	 * works afterwards.
+	 *
+	 * @return {@code false} if no session was running
+	 */
+	public boolean stopProfiling() {
+		if (!sessionActive) {
+			return false;
+		}
+
+		profiler.setEnabled(false);
+		sessionActive = false;
+		sessionEndNanos = 0L;
+		return true;
+	}
+
+	/**
+	 * @param nowNanos {@link System#nanoTime()}
+	 * @return {@code true} exactly once, on the tick a timed session runs out. The caller prints
+	 *         the report (AC-4).
+	 */
+	boolean profilingJustExpired(long nowNanos) {
+		if (!sessionActive || sessionEndNanos == 0L || nowNanos < sessionEndNanos) {
+			return false;
+		}
+
+		profiler.setEnabled(false);
+		sessionActive = false;
+		sessionEndNanos = 0L;
+		return true;
+	}
+
+	/**
+	 * @param nowNanos {@link System#nanoTime()}
+	 * @return seconds left in the current timed session, or 0 when it is untimed or not running
+	 */
+	public long profilingSecondsLeft(long nowNanos) {
+		if (!sessionActive || sessionEndNanos == 0L) {
+			return 0L;
+		}
+
+		return Math.max(0L, (sessionEndNanos - nowNanos + NANOS_PER_SECOND - 1L) / NANOS_PER_SECOND);
 	}
 
 	/**
@@ -280,6 +358,8 @@ public final class TickPilotServerState {
 		// world (SPEC INV-7, AC-19).
 		ProfilerHook.detach();
 		profiler.setEnabled(false);
+		sessionActive = false;
+		sessionEndNanos = 0L;
 		profiler.resetSession();
 		costs.reset();
 		metrics.reset();

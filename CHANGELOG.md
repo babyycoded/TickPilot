@@ -60,7 +60,9 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
 - `/tickpilot top` prints the category split; a category with no injection point prints `n/a`,
   never `0.00` (AC-2). `top entities` and `top blockentities` add the costliest types with their
   instance counts and per-instance averages, grouped by mod namespace (AC-3). Deep profiling is
-  driven by `sampling_enabled` for now; the command that starts a timed session arrives with FR-4.
+  driven by `sampling_enabled` or by `/tickpilot profile <1-300>`, which reports to the server log
+  when it runs out; `profile stop` ends it early and prints the breakdown. Starting a second
+  session is a message, not an exception (AC-4).
 - 29 new unit tests, none of which launch Minecraft; suite total 153.
 - **SPEC changes:** MX-3 now forbids `@Redirect` as well as `@Overwrite` (§13 entry #12);
   `RANDOM_TICKS` is displayed as "Chunk environment" because its only safe measurement point is
@@ -91,10 +93,9 @@ numbers reconcile with the category: the ten listed entity types add up to 7.88 
   top-N buffer during a session. Only type-level aggregation is implemented. §13 entry #14.
 - **Chunk sending to players is in `OTHER`** — deliberate, documented in the README and in
   `ServerConnectionListenerMixin`.
+- **The mod's own overhead (INV-10, FR-12)** — not measured yet; its own commit.
 - **No load test beyond a single machine** — the Lithium run above is one server, one client, one
   mod. Behaviour in a hundred-mod pack is argued from Lithium's source, not measured.
-- **The timed session command (FR-4)** — next, in its own commit.
-- **The mod's own overhead (INV-10, FR-12)** — not measured yet; its own commit.
 
 ### Phase 4 — configuration (FR-15, AC-15)
 
