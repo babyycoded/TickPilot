@@ -5,6 +5,120 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
 
 ## Unreleased
 
+### Phase 6 — `/tickpilot explain` (FR-13, AC-13)
+
+- `/tickpilot explain` (permission level 2) prints everything AC-13 lists — TPS, average MSPT, p95,
+  p99, the longest tick with its age, the dominant category with its share, top-3 entity types,
+  top-3 block entity types, top-3 mod IDs, deferred tasks, mode and load level — and ends in **one**
+  recommendation plus an estimate of its effect.
+- `com.tickpilot.command.ExplainAdvisor` holds the whole decision table and imports nothing from
+  `net.minecraft`, so all 17 of its tests run without launching the game. It reads
+  `TickMetricsSnapshot`, `LoadLevel` and `TickCategory` directly, which were already Minecraft-free.
+- **The effect estimate has five classes and only two of them carry a number.** A number appears
+  only when it is an upper bound derived from a measurement — a type's own measured cost, phrased
+  as "at most X ms/tick, and only if every one of them stops ticking". Nothing claims that removing
+  half of something saves half of the cost, because the distribution across instances was never
+  measured. Chunk operations, scheduled ticks, chunk environment, network, saving and `Other` are
+  always `UNKNOWN`: there is nothing measured to bound them with, and AC-13 names "expected effect
+  unknown" an acceptable answer.
+- **MSPT and TPS are kept apart.** Below 50 ms/tick the server is already at 20 TPS, so a saving
+  there is headroom and not throughput. The two bounded wordings differ on exactly this point,
+  which is the difference between an honest estimate and "this will double your TPS".
+- **Order of the branches is the order of the questions.** Is the reading about load at all
+  (`/tick freeze`, `/tick rate`, warm-up) → is it trustworthy (profiler self-checks) → is anything
+  wrong now → what to do. A non-zero self-check counter suppresses every category verdict rather
+  than printing a confident misattribution.
+- **The two percentile windows finally earn their keep.** A bad 1 min p99 means drops are happening
+  now and the advice is to profile while they are; a clean minute next to a bad history p99 means
+  they already stopped and the advice is to wait for the next one. The second claim is guarded
+  twice: only when the retained history is longer than a minute (otherwise both pairs come from the
+  same samples), and only off the history p99 rather than the maximum (whose value on nearly every
+  server is the ~120 ms startup tick, which is dated on its own line and is not a diagnosis).
+- **Missing data is stated.** No session → one line and a recommendation to run one, no invented
+  breakdown. Under a minute of uptime → the output says what the window really covers, but the
+  verdict is still given, because a server dying thirty seconds after a start really is dying.
+- Two tests enforce the AC-13 wording rules rather than leaving them to review:
+  `onlyTheTwoBoundedEffectsCarryNumbers` fails if an unquantified estimate grows an argument or a
+  bounded one loses its "at most", and `noRecommendationPromisesAMultiple` fails the build on
+  "faster", "boost", "2x", "guarantee", "will fix" and similar in any recommendation string.
+  `everyKeyTheAdvisorCanEmitExistsInTheLanguageFile` drives the decision table and checks each key
+  it can return against `en_us.json`.
+- `explain` aggregates mod IDs over **every** tracked type rather than over the printed top-N, unlike
+  the breakdown under `top`: a mod whose cost is spread across twenty cheap entity types would
+  otherwise never appear in a "top mod IDs" list. The namespace aggregation is now one helper used
+  by both.
+- 17 new unit tests; suite total 177.
+
+#### Verified on a dedicated server, three scenarios
+
+All three are live `./gradlew runServer` runs driven through the server console, not rendered
+examples. The overload runs use `target_mspt = 2.0` / `critical_mspt = 4.0` so a headless server
+with no players genuinely exceeds its configured budget; every number below is measured.
+
+**Healthy.** At 58 s of uptime the short-uptime line appeared with `avg 1m n/a`, and — this is the
+case the guard exists for — the history p99 printed the same 18.40 as the 1 min p99, because both
+were computed from the same samples. No "drops in the past" claim was made. After a session the
+verdict stayed `no action`, with `Chunk operations, 0.23 ms/tick (85.40% of the tick)` as the main
+cost of a 0.27 ms tick: dominant and irrelevant at the same time, which is why the recommendation
+keys off the budget and not off the share.
+
+**Block entities.** 16 040 hoppers in force-loaded chunks, mob spawning off:
+
+```
+Main cost: Block entities, 3.23 ms/tick (95.19% of the tick)
+  minecraft:hopper: 2.57 ms/tick, 16040.00 instances/tick
+Recommendation: reduce how many minecraft:hopper tick ...
+Expected effect: at most 2.57 ms/tick, 75.51% of the measured 3.40 ms tick, and only if every one
+of them stops ticking. MSPT is already under 50 ms, so this buys headroom against future load, not
+more TPS.
+```
+
+The 0.66 ms between the category total and the hopper row is the walk over 16 040 ticker entries,
+which belongs to no type and is charged to the enclosing frame's self time — the arithmetic the
+frame stack was built for, visible in the field.
+
+**Lithium makes 16 000 empty hoppers cost 0.11 ms.** The first attempt at this scenario, with
+`lithium-fabric-0.15.4` installed, measured `BLOCK_ENTITIES 0.11 ms/tick (4.4%)` for the same
+16 000 hoppers and no hopper row at all in the top-3 — the whole category was the ticker walk.
+Lithium was moved out of `run/mods` for the run quoted above and put back afterwards. Worth
+recording as a fact about what the numbers mean: on a server with Lithium, "thousands of hoppers"
+is not automatically the answer.
+
+**Chunk generation landed in `Other`, and the mod said so instead of guessing.** Force-loading
+1024 fresh chunks produced a single **35 s** tick, and all of it was attributed to `OTHER`
+(174.35 ms/tick over 201 profiled ticks, 92.54 %). That is correct, not a miss: vanilla's
+`ForceLoadCommand` calls `getChunk(..., FULL, true)` per chunk, so the generation runs
+synchronously inside command execution, which is outside the profiled `ServerChunkCache.tick`
+region. The output recommended a JVM profiler and returned `Expected effect: unknown` rather than
+attributing 35 seconds to a category that did not spend it. Whether generation driven the normal
+way — a player walking into new terrain — lands in `CHUNK_OPS` instead is **not verified**. It is
+expected to, because that path is driven by the chunk system's tick rather than by command
+execution, but the same expectation was already wrong once about the forceload path, so it stays an
+expectation until a run with a connected client shows otherwise. The `chunk_ops` recommendation
+text is covered by unit tests only.
+
+#### Not implemented / deferred
+
+- **Deferred task count is `n/a`, not `0`.** The adaptive scheduler is FR-6 and arrives in Phase 7.
+  Nothing defers anything yet, so there is no queue to count, and a zero would read as a measured
+  empty one.
+- **The mode shown is read, not settable.** `/tickpilot mode <strict|balanced|aggressive>` is part
+  of FR-12 but belongs with the policies it controls (FR-11, Phase 8). `explain` reports
+  `TickPilotConfig.effectiveMode()`, which is the real value including the `safe_compatibility_mode`
+  override, and says when that override is what produced it. Changing it still means editing the
+  config and running `/tickpilot reload`.
+- **No coordinates in the recommendation.** Naming *where* the expensive block entities are would
+  make the advice far more actionable, and needs the per-position buffer deferred in §13 entry #14.
+- **The recommendation for `SCHEDULED_TICKS` cannot name a block.** That category has no per-type
+  attribution, so the advice is a direction to look in rather than a culprit. Adding one needs a
+  hook per scheduled tick, whose cost was judged not worth it in Phase 5.
+- **The `chunk_ops` recommendation was never exercised on a live server**, and it is not known
+  which category player-driven chunk generation actually lands in. Reproducing it needs a connected
+  client walking into ungenerated terrain, which cannot be driven from a console script; the
+  headless approach generates chunks inside command execution and lands in `OTHER`. Unit tests
+  cover the branch, a live run does not. For the integration checklist, alongside the Phase 3
+  vanilla `getTickTimesNanos()` cross-check that is deferred for the same reason.
+
 ### Phase 5 — category profiler and top-N (FR-2, FR-3, FR-4)
 
 - `com.tickpilot.profiler.TickProfiler` — a frame stack that charges each region only its **self

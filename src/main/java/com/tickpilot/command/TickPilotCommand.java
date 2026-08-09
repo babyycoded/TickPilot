@@ -50,6 +50,9 @@ public final class TickPilotCommand {
 	/** How many types /tickpilot top entities|blockentities lists (SPEC AC-3 top-N). */
 	private static final int TOP_N = 10;
 
+	/** How many rows each list in {@code /tickpilot explain} holds (SPEC AC-13 asks for three). */
+	private static final int EXPLAIN_TOP_N = 3;
+
 	/**
 	 * How many times {@code OverheadMeter.record} runs in one tick: once around each half of the
 	 * tick listener. Used to turn the mean slice into a per-tick figure.
@@ -79,6 +82,9 @@ public final class TickPilotCommand {
 				.then(Commands.literal("reload")
 						.requires(source -> source.hasPermission(2))
 						.executes(context -> reload(context.getSource())))
+				.then(Commands.literal("explain")
+						.requires(source -> source.hasPermission(2))
+						.executes(context -> explain(context.getSource())))
 				.then(Commands.literal("top")
 						.requires(source -> source.hasPermission(2))
 						.executes(context -> top(context.getSource()))
@@ -218,20 +224,14 @@ public final class TickPilotCommand {
 	private static void sendModBreakdown(CommandSourceStack source, TickCategory category,
 			List<CostTracker.TypeCost> rows, long ticks) {
 		Map<String, Long> byNamespace = new LinkedHashMap<>();
-
-		for (CostTracker.TypeCost row : rows) {
-			ResourceLocation id = idOf(category, row.key());
-			String namespace = id == null ? "unregistered" : id.getNamespace();
-			byNamespace.merge(namespace, row.totalNanos(), Long::sum);
-		}
+		aggregateByNamespace(category, rows, byNamespace);
 
 		if (byNamespace.size() < 2) {
 			// One namespace is not a breakdown, it is the same line again.
 			return;
 		}
 
-		List<Map.Entry<String, Long>> sorted = new ArrayList<>(byNamespace.entrySet());
-		sorted.sort(Map.Entry.<String, Long>comparingByValue().reversed());
+		List<Map.Entry<String, Long>> sorted = sortedByCostDescending(byNamespace);
 
 		source.sendSuccess(() -> Component.translatable("command.tickpilot.top.mods.header"), false);
 
@@ -239,6 +239,25 @@ public final class TickPilotCommand {
 			source.sendSuccess(() -> Component.translatable("command.tickpilot.top.mods.row",
 					entry.getKey(), format(toMsptPerTick(entry.getValue(), ticks))), false);
 		}
+	}
+
+	/**
+	 * Adds {@code rows} into a namespace-keyed accumulator. Shared by the per-category breakdown of
+	 * {@code top} and the combined one of {@code explain}, so both answer "which mod" the same way.
+	 */
+	private static void aggregateByNamespace(TickCategory category, List<CostTracker.TypeCost> rows,
+			Map<String, Long> into) {
+		for (CostTracker.TypeCost row : rows) {
+			ResourceLocation id = idOf(category, row.key());
+			String namespace = id == null ? "unregistered" : id.getNamespace();
+			into.merge(namespace, row.totalNanos(), Long::sum);
+		}
+	}
+
+	private static List<Map.Entry<String, Long>> sortedByCostDescending(Map<String, Long> costs) {
+		List<Map.Entry<String, Long>> sorted = new ArrayList<>(costs.entrySet());
+		sorted.sort(Map.Entry.<String, Long>comparingByValue().reversed());
+		return sorted;
 	}
 
 	private static ResourceLocation idOf(TickCategory category, Object key) {
@@ -327,6 +346,291 @@ public final class TickPilotCommand {
 
 	private static double toMsptPerTick(long nanos, long ticks) {
 		return ticks <= 0L ? 0.0 : (double) nanos / ticks / 1_000_000.0;
+	}
+
+	/**
+	 * The human-readable breakdown of SPEC FR-13 (SPEC FR-12 {@code /tickpilot explain}).
+	 *
+	 * <p>Everything AC-13 lists is printed from something that was measured, and everything that
+	 * was not measured says so instead of showing a zero: a server with no profiling session gets
+	 * one honest line where the category breakdown would be, and the deferred-task count is
+	 * {@code n/a} because the scheduler of FR-6 does not exist yet.
+	 *
+	 * <p>The single recommendation and its effect estimate come from {@link ExplainAdvisor}, which
+	 * holds the whole decision table and is unit-tested without the game.
+	 */
+	private static int explain(CommandSourceStack source) {
+		try {
+			TickPilotServerState state = ServerStateHolder.get(source.getServer());
+
+			if (state == null || state.isDisabled()) {
+				source.sendFailure(Component.translatable("command.tickpilot.status.unavailable"));
+				return 0;
+			}
+
+			long nowNanos = System.nanoTime();
+			TickMetricsSnapshot metrics = state.snapshot(nowNanos);
+
+			if (metrics.isEmpty()) {
+				// Nothing measured at all is the one case with no verdict of any kind.
+				source.sendSuccess(() -> Component.translatable("command.tickpilot.status.no_metrics"),
+						false);
+				return 1;
+			}
+
+			TickBudget budget = state.budget();
+			boolean warmingUp = budget.isWarmingUp(nowNanos / NANOS_PER_MILLI);
+
+			sendExplainMetrics(source, state, metrics, budget, warmingUp, nowNanos);
+			ExplainAdvisor.Profile profile = buildProfile(state);
+			sendExplainProfile(source, state, profile);
+			sendExplainRecommendation(source, ExplainAdvisor.advise(metrics, budget.level(),
+					budget.targetMspt(), budget.criticalMspt(), warmingUp,
+					state.isTickRateModified(), profile));
+			return 1;
+		} catch (Throwable t) {
+			TickPilot.LOGGER.error("/tickpilot explain failed", t);
+			source.sendFailure(Component.translatable("command.tickpilot.error"));
+			return 0;
+		}
+	}
+
+	/**
+	 * The AC-13 metric lines, plus the state that decides how much they are worth.
+	 *
+	 * <p>The two percentile pairs are used for what they were introduced for in Phase 3: the 1 min
+	 * pair says whether drops are happening now, the history pair whether they happened earlier.
+	 * Saying "there were drops" from a single number cannot distinguish an ongoing problem from a
+	 * recovered one.
+	 */
+	private static void sendExplainMetrics(CommandSourceStack source, TickPilotServerState state,
+			TickMetricsSnapshot metrics, TickBudget budget, boolean warmingUp, long nowNanos) {
+		source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.header",
+				metrics.totalTicks(), formatDuration(metrics.uptimeNanos())), false);
+
+		// Not a refusal to answer: the numbers below are real even at thirty seconds of uptime, and
+		// a server dying that early really is dying. This says what the window covers so that an
+		// early verdict is read as early (SPEC AC-13, "say when there is little data").
+		if (!ExplainAdvisor.hasFullWindow(metrics)) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.short_uptime",
+					formatDuration(metrics.uptimeNanos())).withStyle(ChatFormatting.YELLOW), false);
+		}
+
+		source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.tps",
+				Component.literal(format(metrics.tps())).withStyle(tpsColour(metrics.tps())),
+				format(metrics.avgMspt5s()),
+				windowed(metrics, metrics.avgMspt1m(), TickMetrics.WINDOW_1M_NANOS)), false);
+
+		source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.percentiles",
+				format(metrics.p95Mspt1m()), format(metrics.p99Mspt1m()),
+				formatDuration(metrics.shortPercentileSpanNanos())), false);
+
+		source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.max",
+				format(metrics.maxMspt()), formatDuration(metrics.maxAgeNanos()),
+				format(metrics.p99MsptHistory()), formatDuration(metrics.retainedSpanNanos())), false);
+
+		double critical = budget.criticalMspt();
+
+		if (ExplainAdvisor.spikingNow(metrics, critical)) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.note.spiking_now",
+					formatDuration(metrics.shortPercentileSpanNanos()), format(metrics.p99Mspt1m()),
+					format(critical), format(metrics.avgMspt5s()))
+					.withStyle(ChatFormatting.GOLD), false);
+		} else if (ExplainAdvisor.spikedBefore(metrics, critical)) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.note.past_spikes",
+					format(metrics.p99Mspt1m()), format(metrics.p99MsptHistory()),
+					formatDuration(metrics.retainedSpanNanos()))
+					.withStyle(ChatFormatting.YELLOW), false);
+		}
+
+		LoadLevel level = budget.level();
+
+		source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.load",
+				Component.translatable(level.translationKey()).withStyle(levelColour(level)),
+				Component.translatable(state.config().effectiveMode().translationKey()),
+				Component.translatable(state.config().enableAdaptiveMode()
+						? "tickpilot.value.enabled" : "tickpilot.value.disabled")), false);
+
+		// effectiveMode() silently overrides default_mode, so a mode nobody configured must not
+		// appear without its reason.
+		if (state.config().safeCompatibilityMode()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.mode_forced")
+					.withStyle(ChatFormatting.GRAY), false);
+		}
+
+		if (warmingUp) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.status.warming_up",
+					formatDuration(budget.warmupRemainingMillis(nowNanos / NANOS_PER_MILLI)
+							* NANOS_PER_MILLI)).withStyle(ChatFormatting.YELLOW), false);
+		}
+
+		if (state.isTickRateFrozen()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.status.frozen")
+					.withStyle(ChatFormatting.YELLOW), false);
+		} else if (state.tickRate() != 20.0f) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.status.tickrate",
+					format(state.tickRate())).withStyle(ChatFormatting.YELLOW), false);
+		}
+
+		// AC-13 asks for the deferred task count. FR-6 has not been built, so the honest answer is
+		// that there is no queue - not a zero, which would read as a measured empty one.
+		source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.deferred_unavailable")
+				.withStyle(ChatFormatting.GRAY), false);
+	}
+
+	/**
+	 * Flattens what the profiler knows into the input {@link ExplainAdvisor} reads.
+	 *
+	 * <p>The dominant category is picked over the categories that have a working hook, plus OTHER,
+	 * which is derived from TOTAL and therefore always meaningful. A category that was never
+	 * measured cannot win by being zero, and TOTAL is excluded because it is the whole tick rather
+	 * than a part of it.
+	 */
+	private static ExplainAdvisor.Profile buildProfile(TickPilotServerState state) {
+		TickProfiler profiler = state.profiler();
+		long ticks = profiler.sessionTicks();
+
+		if (ticks == 0L) {
+			return ExplainAdvisor.Profile.none();
+		}
+
+		TickCategory dominant = null;
+		long dominantNanos = -1L;
+
+		for (TickCategory category : TickCategory.all()) {
+			if (category == TickCategory.TOTAL) {
+				continue;
+			}
+
+			if (category != TickCategory.OTHER && !profiler.isAvailable(category)) {
+				continue;
+			}
+
+			long nanos = profiler.sessionNanos(category);
+
+			if (nanos > dominantNanos) {
+				dominantNanos = nanos;
+				dominant = category;
+			}
+		}
+
+		double totalMspt = toMsptPerTick(profiler.sessionNanos(TickCategory.TOTAL), ticks);
+		double dominantMspt = toMsptPerTick(Math.max(0L, dominantNanos), ticks);
+		double share = totalMspt > 0.0 ? dominantMspt / totalMspt * 100.0 : 0.0;
+
+		String topTypeId = null;
+		double topTypeMspt = 0.0;
+		double topTypeInstances = 0.0;
+		List<CostTracker.TypeCost> top = dominant == null
+				? List.of()
+				: state.costs().top(dominant, 1);
+
+		if (!top.isEmpty()) {
+			CostTracker.TypeCost row = top.get(0);
+			ResourceLocation id = idOf(dominant, row.key());
+			topTypeId = id == null ? "unregistered" : id.toString();
+			topTypeMspt = toMsptPerTick(row.totalNanos(), ticks);
+			topTypeInstances = (double) row.invocations() / ticks;
+		}
+
+		return new ExplainAdvisor.Profile(ticks, profiler.isConsistent(), dominant, dominantMspt,
+				share, totalMspt, topTypeId, topTypeMspt, topTypeInstances);
+	}
+
+	/** The AC-13 breakdown: main category, top-3 entities, top-3 block entities, top-3 mods. */
+	private static void sendExplainProfile(CommandSourceStack source, TickPilotServerState state,
+			ExplainAdvisor.Profile profile) {
+		if (!profile.hasSession()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.no_session",
+					ExplainAdvisor.SUGGESTED_PROFILE_SECONDS).withStyle(ChatFormatting.GRAY), false);
+			return;
+		}
+
+		source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.session",
+				profile.sessionTicks(), format(profile.totalMsptPerTick())), false);
+
+		source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.main_cost",
+				Component.translatable(profile.dominant().translationKey()),
+				format(profile.dominantMsptPerTick()), format(profile.dominantSharePercent())), false);
+
+		sendExplainTypes(source, state, TickCategory.ENTITIES,
+				"command.tickpilot.explain.top_entities");
+		sendExplainTypes(source, state, TickCategory.BLOCK_ENTITIES,
+				"command.tickpilot.explain.top_block_entities");
+		sendExplainMods(source, state, profile.sessionTicks());
+
+		if (!state.profiler().isConsistent()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.top.inconsistent",
+					state.profiler().droppedFrames(), state.profiler().unbalancedEnds(),
+					state.profiler().abandonedFrames(), state.profiler().overrunTicks())
+					.withStyle(ChatFormatting.RED), false);
+		}
+	}
+
+	private static void sendExplainTypes(CommandSourceStack source, TickPilotServerState state,
+			TickCategory category, String headerKey) {
+		long ticks = state.profiler().sessionTicks();
+		List<CostTracker.TypeCost> rows = state.costs().top(category, EXPLAIN_TOP_N);
+
+		source.sendSuccess(() -> Component.translatable(headerKey), false);
+
+		if (rows.isEmpty()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.list_empty")
+					.withStyle(ChatFormatting.GRAY), false);
+			return;
+		}
+
+		for (CostTracker.TypeCost row : rows) {
+			ResourceLocation id = idOf(category, row.key());
+
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.type_row",
+					id == null ? "unregistered" : id.toString(),
+					format(toMsptPerTick(row.totalNanos(), ticks)),
+					format((double) row.invocations() / ticks)), false);
+		}
+	}
+
+	/**
+	 * The top mod IDs of AC-13, over both per-type categories at once.
+	 *
+	 * <p>Unlike the breakdown under {@code top}, this one aggregates every tracked type rather than
+	 * the printed top-N: a mod whose cost is spread over twenty cheap entity types would otherwise
+	 * never appear, which is the opposite of what a "top mod IDs" list is for.
+	 */
+	private static void sendExplainMods(CommandSourceStack source, TickPilotServerState state,
+			long ticks) {
+		Map<String, Long> byNamespace = new LinkedHashMap<>();
+		aggregateByNamespace(TickCategory.ENTITIES,
+				state.costs().top(TickCategory.ENTITIES, Integer.MAX_VALUE), byNamespace);
+		aggregateByNamespace(TickCategory.BLOCK_ENTITIES,
+				state.costs().top(TickCategory.BLOCK_ENTITIES, Integer.MAX_VALUE), byNamespace);
+
+		source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.top_mods"), false);
+
+		if (byNamespace.isEmpty()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.list_empty")
+					.withStyle(ChatFormatting.GRAY), false);
+			return;
+		}
+
+		List<Map.Entry<String, Long>> sorted = sortedByCostDescending(byNamespace);
+
+		for (int i = 0; i < Math.min(EXPLAIN_TOP_N, sorted.size()); i++) {
+			Map.Entry<String, Long> entry = sorted.get(i);
+
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.mod_row",
+					entry.getKey(), format(toMsptPerTick(entry.getValue(), ticks))), false);
+		}
+	}
+
+	/** Prints the one recommendation of AC-13 and its effect estimate, in that order. */
+	private static void sendExplainRecommendation(CommandSourceStack source,
+			ExplainAdvisor.Recommendation recommendation) {
+		source.sendSuccess(() -> Component.translatable(recommendation.messageKey(),
+				recommendation.args().toArray()).withStyle(ChatFormatting.AQUA), false);
+
+		source.sendSuccess(() -> Component.translatable(recommendation.effect().translationKey(),
+				recommendation.effectArgs().toArray()), false);
 	}
 
 	/**
