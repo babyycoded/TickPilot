@@ -5,6 +5,61 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
 
 ## Unreleased
 
+### Phase 4 — configuration (FR-15, AC-15)
+
+- `config/tickpilot.toml` — every key and default of the FR-15 schema, created with its comments
+  on first start and applied by `/tickpilot reload` without a restart.
+- `com.tickpilot.config.TickPilotConfig` — immutable, already-validated snapshot. Held per
+  `MinecraftServer` in `TickPilotServerState`, not in a static field (INV-7).
+- `com.tickpilot.config.TomlParser` / `TomlWriter` — a hand-written parser for the subset of TOML
+  the schema uses, and the writer that produces the commented default file. **No new dependency**
+  was added: there is no TOML parser anywhere on the compile classpath, so a library would have
+  had to be nested in the mod jar. Choice made with the project owner before touching
+  `build.gradle`; alternatives and their costs are in §13 entry #10, the unsupported syntax is
+  listed in the README, and each unsupported construct is refused by name rather than as a
+  generic syntax error.
+- `com.tickpilot.config.ConfigLoader` — the three AC-15 behaviours:
+  - file missing → written once with defaults;
+  - file unreadable or unparseable → defaults, and **the file is not touched**, verified on a live
+    server by comparing its checksum before and after;
+  - a single value invalid → that field falls back to its default and is reported, every other
+    value from the file is kept.
+  Nothing throws at the caller: a config problem is a log line, never a crash (INV-9).
+- Cross-field validation for the two pairs that can be individually valid and jointly useless:
+  `critical_mspt > target_mspt` and `reduced_radius > full_radius`. Both would otherwise leave a
+  load level or an activity zone as an unreachable empty band — the §13 entry #7 failure. The
+  loader keeps the operator's value when repairing one side of the pair is enough, and resets both
+  only when it is not. Added rule, §13 entry #11.
+- `TickBudget` now takes its thresholds from the config instead of the hard-wired defaults, closing
+  the Phase 3 deferral. It is rebuilt on reload **only if a threshold actually moved**, so a reload
+  does not silently drop the reported load level back to NORMAL for no reason.
+- `/tickpilot reload` (permission level 2, FR-12) reports which of the four outcomes happened,
+  lists up to eight rejected values in chat with the rest in the log, and returns failure to a
+  command block when the file could not be read. An unparseable file puts the server back on
+  defaults, and the message says so — nobody is left thinking their edits took effect.
+- 59 new unit tests (24 for the parser, 31 for loading and validation, 4 for applying a config to
+  a running server), none of which launch Minecraft; the filesystem cases run against a JUnit
+  `@TempDir`. Suite total is now 112.
+
+#### Not implemented / deferred
+
+- **Warm-up period for the load level** — Phase 3 deferred the bogus `NORMAL -> CRITICAL` logged
+  at every server start to this phase, on the grounds that the thresholds were moving into the
+  config anyway. They have, but the fix itself is a `TickBudget` behaviour change rather than a
+  config one and is not part of the FR-15 scope, so it is **still open** and still reproduces
+  (observed again during this phase's manual verification: `Load level NORMAL -> CRITICAL
+  (avg MSPT 51.42)` a second after `Done`).
+- **Configurable permission level for `/tickpilot status`** — FR-12 wants an operator-settable
+  level, but FR-15 defines no key for it and this phase does not invent one. Still hard-wired
+  to level 0.
+- **`enable_adaptive_mode`, `default_mode` and the five lists are stored, not obeyed** — they are
+  parsed and validated, and nothing reads them yet. The scheduler, zones and policies that act on
+  them are FR-6, FR-7 and FR-11 in later phases. `safe_compatibility_mode` forcing STRICT is
+  implemented as `TickPilotConfig.effectiveMode()`, but with no policy to obey it that is a value,
+  not a behaviour.
+- **No hot reload from a file watcher** — FR-15 does not ask for one; the config is re-read on
+  `/tickpilot reload` and at server start only.
+
 ### Phase 3 — tick metrics and load levels (FR-1, FR-5)
 
 - `com.tickpilot.metrics.TickMetrics` — ring buffer of 6000 tick samples (5 min at 20 TPS) on two

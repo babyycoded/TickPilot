@@ -33,6 +33,7 @@ mid-tick, which reads as a permanent 19.80 on a perfectly healthy server.
 | Command | Permission | What it does |
 |---|---|---|
 | `/tickpilot status` | everyone | TPS, MSPT (last / 5 s / 1 min / 5 min averages, p95, p99, max), load level, uptime |
+| `/tickpilot reload` | level 2 | Re-reads `config/tickpilot.toml` and reports what it accepted |
 
 Example output:
 
@@ -70,9 +71,63 @@ up long enough to fill reads `n/a` rather than quietly averaging less time than 
 MSPT: last 0.12, avg 5s 0.10, 1m 0.88, 5m n/a
 ```
 
+## Configuration
+
+`config/tickpilot.toml` is created with commented defaults the first time the server starts, and
+`/tickpilot reload` applies changes without a restart. Every setting and its default is listed in
+the generated file itself, so the file is the reference rather than this section.
+
+### The rules the loader follows
+
+**Your file is never rewritten.** It is written exactly once — when it does not exist. A file that
+fails to parse is the one you need to read to find your mistake, so overwriting it with defaults
+would be the worst possible response. The mod logs the line number and carries on.
+
+**A bad value costs you that value, not the file.** Each setting is validated on its own: an
+impossible `full_radius` falls back to 32 and is reported, while every other setting you edited is
+still applied. A parse error is different — a file that is not valid syntax cannot be trusted
+line by line, so everything falls back to defaults and the log says so.
+
+**Nothing here can stop the server.** A config problem is a warning in the log and a message in
+chat, never a crash.
+
+What that looks like when three values are wrong and one key is misspelled:
+
+```
+[tickpilot] Loaded tickpilot.toml with 4 rejected value(s); the default is used for each of them
+[tickpilot]   critical_mspt (20.0) must be greater than target_mspt (45.0); using the default 50.0
+[tickpilot]   full_radius (line 27): must be between 1 and 2147483647, got -1; using 32
+[tickpilot]   sampling_enabled (line 46): expected true or false, got "yes"; using false
+[tickpilot]   unknown key 'max_deferrd_tasks' (line 37); ignoring it
+```
+
+Two settings are validated as a pair, because either one alone can be perfectly sensible while
+the combination is not: `critical_mspt` must be above `target_mspt`, and `reduced_radius` above
+`full_radius`. `critical == target` would leave the ELEVATED and HIGH load levels as empty bands
+that can never be reached, and `reduced <= full` does the same to the REDUCED activity zone. When
+a pair is inverted the loader repairs the smallest part of it that it can, and only resets both
+when keeping your value would still leave the pair inverted.
+
+### The supported TOML subset
+
+TickPilot parses TOML itself rather than bundling a parser. Fabric ships no TOML library, so a
+dependency would have to be nested inside the mod jar — a few hundred kilobytes and a version
+conflict waiting to happen in a large modpack, in return for reading a twenty-line config file.
+The trade is that the parser covers what the schema uses and nothing more:
+
+- `key = value` and one `[lists]` table;
+- integers, floats, `true` / `false`, `"double-quoted strings"`, and arrays of them;
+- `#` comments and blank lines anywhere; arrays may span lines.
+
+Valid TOML that is **not** supported: `'single-quoted'` strings, `"""multi-line"""` strings,
+inline tables (`{ a = 1 }`), dotted keys (`a.b = 1`), arrays of tables, dates and times, and
+hexadecimal or binary integers. Using one of these is treated the same as a syntax error: the mod
+names the construct and the line, keeps your file, and runs on defaults.
+
 ## Load levels
 
-Computed from the 5 s average MSPT. With the default budget (target 40 ms, critical 50 ms):
+Computed from the 5 s average MSPT, with the thresholds from `config/tickpilot.toml`. With the
+default budget (target 40 ms, critical 50 ms):
 
 | Level | Average MSPT |
 |---|---|
@@ -85,9 +140,14 @@ The level does not chatter on a boundary: leaving a level downwards requires the
 a margin below the threshold *and* the level to have been held for at least five seconds.
 Escalation is immediate, because the input is already a five-second average.
 
-Load level is **not** the same thing as the adaptive mode (STRICT / BALANCED / AGGRESSIVE, arriving
-in a later phase). The level says how bad things are and is computed; the mode says how far the
-mod may intervene and is chosen by you.
+Load level is **not** the same thing as the adaptive mode (STRICT / BALANCED / AGGRESSIVE). The
+level says how bad things are and is computed; the mode says how far the mod may intervene and is
+chosen by you in `default_mode`. Nothing acts on the mode yet — the policies it governs arrive in
+a later phase — so today it is validated and stored, and that is all.
+
+Changing `target_mspt` or `critical_mspt` and running `/tickpilot reload` rebuilds the thresholds
+and resets the level to NORMAL; it settles on the true level within about five seconds. A reload
+that leaves both thresholds alone does not disturb the level.
 
 ## How tick time is measured, and what that misses
 
@@ -122,9 +182,10 @@ command. It is not free, but it is not something you will see in MSPT either.
 ./gradlew test    # unit tests only
 ```
 
-The unit tests do not launch Minecraft: `com.tickpilot.metrics.TickMetrics` and
-`com.tickpilot.budget.TickBudget` are plain Java classes with no `net.minecraft` imports, and the
-clock is supplied by the test.
+The unit tests do not launch Minecraft: `com.tickpilot.metrics.TickMetrics`,
+`com.tickpilot.budget.TickBudget` and everything in `com.tickpilot.config` are plain Java classes
+with no `net.minecraft` imports. The clock is supplied by the test, and the config tests run
+against a temporary directory.
 
 ## Licence
 

@@ -9,6 +9,8 @@ import com.tickpilot.TickPilot;
 import com.tickpilot.TickPilotServerState;
 import com.tickpilot.budget.LoadLevel;
 import com.tickpilot.budget.TickBudget;
+import com.tickpilot.config.ConfigLoadResult;
+import com.tickpilot.config.ConfigLoader;
 import com.tickpilot.metrics.TickMetrics;
 import com.tickpilot.metrics.TickMetricsSnapshot;
 
@@ -22,10 +24,16 @@ import net.minecraft.network.chat.Component;
 /**
  * Owns the {@code /tickpilot} command tree (SPEC FR-12).
  *
- * <p>{@code status} reports the SPEC AC-1 metrics and the SPEC FR-5 load level. Subcommands are
- * added by the phases that make them meaningful.
+ * <p>{@code status} reports the SPEC AC-1 metrics and the SPEC FR-5 load level; {@code reload}
+ * re-reads the config (SPEC AC-15). Subcommands are added by the phases that make them meaningful.
  */
 public final class TickPilotCommand {
+	/**
+	 * How many rejected values {@code reload} prints into the chat before it stops and points at
+	 * the log. A config with fifty typos would otherwise scroll the operator's chat away.
+	 */
+	private static final int MAX_PROBLEMS_SHOWN = 8;
+
 	private TickPilotCommand() {
 	}
 
@@ -39,10 +47,88 @@ public final class TickPilotCommand {
 
 	private static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
 		// SPEC FR-12 gives `status` permission level 0, i.e. available to everyone, so no
-		// `requires` clause. Making the level configurable needs the config from FR-15.
+		// `requires` clause. Making the level configurable needs a config key that FR-15 does not
+		// define, so it stays at 0.
 		dispatcher.register(Commands.literal("tickpilot")
 				.then(Commands.literal("status")
-						.executes(context -> status(context.getSource()))));
+						.executes(context -> status(context.getSource())))
+				.then(Commands.literal("reload")
+						.requires(source -> source.hasPermission(2))
+						.executes(context -> reload(context.getSource()))));
+	}
+
+	/**
+	 * Re-reads {@code config/tickpilot.toml} and applies it (SPEC AC-15).
+	 *
+	 * <p>A file that cannot be parsed puts the server back on the defaults rather than leaving the
+	 * previous values in place, which is what AC-15 asks for; the message says so explicitly, so
+	 * nobody is left thinking their edits took effect. The file itself is never rewritten.
+	 */
+	private static int reload(CommandSourceStack source) {
+		try {
+			TickPilotServerState state = ServerStateHolder.get(source.getServer());
+
+			if (state == null || state.isDisabled()) {
+				source.sendFailure(Component.translatable("command.tickpilot.status.unavailable"));
+				return 0;
+			}
+
+			ConfigLoadResult result = ConfigLoader.load(TickPilot.configFile());
+			// The log keeps the full list even when chat only gets the first few.
+			TickPilot.logConfigResult(result);
+
+			boolean thresholdsChanged = state.reconfigure(result.config(), System.currentTimeMillis());
+
+			switch (result.status()) {
+				case CREATED -> source.sendSuccess(() -> Component.translatable(
+						"command.tickpilot.reload.created", ConfigLoader.FILE_NAME), true);
+				case CREATE_FAILED -> source.sendSuccess(() -> Component.translatable(
+						"command.tickpilot.reload.create_failed", ConfigLoader.FILE_NAME)
+						.withStyle(ChatFormatting.YELLOW), true);
+				case LOADED -> source.sendSuccess(() -> Component.translatable(
+						"command.tickpilot.reload.loaded", ConfigLoader.FILE_NAME), true);
+				case LOADED_WITH_PROBLEMS -> source.sendSuccess(() -> Component.translatable(
+						"command.tickpilot.reload.problems", result.problems().size(),
+						ConfigLoader.FILE_NAME).withStyle(ChatFormatting.YELLOW), true);
+				case UNREADABLE -> source.sendSuccess(() -> Component.translatable(
+						"command.tickpilot.reload.unreadable", ConfigLoader.FILE_NAME)
+						.withStyle(ChatFormatting.RED), true);
+			}
+
+			sendProblems(source, result);
+
+			if (thresholdsChanged) {
+				TickBudget budget = state.budget();
+				source.sendSuccess(() -> Component.translatable("command.tickpilot.reload.thresholds",
+						format(budget.targetMspt()), format(budget.highMspt()),
+						format(budget.criticalMspt())), false);
+			}
+
+			// UNREADABLE is a real failure even though the server carries on, so it must not report
+			// success to a command block or a script.
+			return result.status() == ConfigLoadResult.Status.UNREADABLE ? 0 : 1;
+		} catch (Throwable t) {
+			TickPilot.LOGGER.error("/tickpilot reload failed", t);
+			source.sendFailure(Component.translatable("command.tickpilot.error"));
+			return 0;
+		}
+	}
+
+	private static void sendProblems(CommandSourceStack source, ConfigLoadResult result) {
+		int shown = Math.min(result.problems().size(), MAX_PROBLEMS_SHOWN);
+
+		for (int i = 0; i < shown; i++) {
+			String problem = result.problems().get(i);
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.reload.problem", problem)
+					.withStyle(ChatFormatting.GRAY), false);
+		}
+
+		int hidden = result.problems().size() - shown;
+
+		if (hidden > 0) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.reload.more", hidden)
+					.withStyle(ChatFormatting.GRAY), false);
+		}
 	}
 
 	private static int status(CommandSourceStack source) {
