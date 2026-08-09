@@ -28,19 +28,37 @@ TickPilot — серверный Fabric-мод для Minecraft Java Edition 1.2
 | Лицензия | MIT (если не указано иное) |
 | Стороны | `main` (server + common), `client` (опциональный HUD) |
 
-### 1.1 Версии зависимостей (проверять, НЕ угадывать)
+### 1.1 Маппинги: Mojang Mappings (Mojmap), НЕ Yarn
+
+**Решение зафиксировано в журнале §13 (запись #1).** Проект собирается на официальных
+Mojang mappings (`mappings loom.officialMojangMappings()` в `build.gradle`), а не на Yarn.
+Все имена классов/методов в этом документе и в коде — **Mojang-нейминг**
+(`ResourceLocation`, `Minecraft`, `Level`, `ServerLevel`, `MinecraftServer`, ...).
+Если где-то в тексте всплывёт Yarn-имя (`Identifier`, `MinecraftClient`, `World`) — это
+ошибка документа, а не инструкция писать код под Yarn.
+
+### 1.2 Версии зависимостей (проверять, НЕ угадывать)
 
 Точные версии **обязательно** получить из живых источников перед написанием `gradle.properties`:
 
 ```bash
-curl -s https://meta.fabricmc.net/v2/versions/yarn/1.21.1   | head -c 400   # yarn mappings
 curl -s https://meta.fabricmc.net/v2/versions/loader/1.21.1 | head -c 400   # fabric loader
 # Fabric API для 1.21.1: https://modrinth.com/mod/fabric-api/versions?g=1.21.1
-# Готовый шаблон build.gradle: https://fabricmc.net/develop/template/
+# Готовый шаблон build.gradle (Mojmap по умолчанию): https://fabricmc.net/develop/template/
 ```
 
-Ориентировочные значения (могут быть устаревшими — сверить!):
-`minecraft_version=1.21.1`, `yarn_mappings=1.21.1+build.3`, `loader_version=0.16.x`, `fabric_version=0.116.x+1.21.1`, Loom `1.7-SNAPSHOT` или новее.
+Yarn mappings **не используются** — соответствующую строку в `gradle.properties` добавлять не нужно.
+
+Ориентировочные значения (могут быть устаревшими — сверить перед использованием!):
+`minecraft_version=1.21.1`, `loader_version=0.19.x`, `fabric_version=0.116.x+1.21.1`, Loom `1.17-SNAPSHOT` или новее.
+
+**Проверка имён реального Minecraft API — не по внешним сайтам, а по кэшу проекта:**
+самый надёжный способ — распаковать `mappings.tiny` из
+`~/.gradle/caches/fabric-loom/1.21.1/.../mappings.jar` (колонки `official / intermediary / named`,
+`named` = Mojang-имена) и грепать по нему; это ровно те мапперы, с которыми реально
+собирается проект. Альтернатива — `./gradlew genSources` и просмотр декомпилированных
+исходников в IDE. Внешние сайты вроде mappings.dev/linkie ориентированы на Yarn и
+здесь малополезны.
 
 ---
 
@@ -79,7 +97,7 @@ curl -s https://meta.fabricmc.net/v2/versions/loader/1.21.1 | head -c 400   # fa
 
 Эти правила важнее любой фичи. Их нельзя обойти «ради производительности».
 
-- **INV-1 (Thread safety).** Запрещено обращаться к `World`, `ServerWorld`, `Entity`, `BlockEntity`, `Chunk`, `MinecraftServer`, реестрам и игровым коллекциям из любого потока, кроме серверного. В фоне разрешены только чистые вычисления над скопированными примитивами/иммутабельными снимками.
+- **INV-1 (Thread safety).** Запрещено обращаться к `Level`, `ServerLevel`, `Entity`, `BlockEntity`, `LevelChunk`, `MinecraftServer`, реестрам и игровым коллекциям из любого потока, кроме серверного. В фоне разрешены только чистые вычисления над скопированными примитивами/иммутабельными снимками.
 - **INV-2 (Apply on main).** Любая мутация мира применяется на серверном потоке.
 - **INV-3 (Safe by default).** Любая спорная оптимизация выключена по умолчанию и имеет отдельный флаг конфига.
 - **INV-4 (No silent breakage).** Если безопасной точки интеграции нет — реализуется только профилирование, а в README/логе честно пишется об ограничении.
@@ -100,6 +118,8 @@ curl -s https://meta.fabricmc.net/v2/versions/loader/1.21.1 | head -c 400   # fa
 Мод измеряет длительность каждого тика серверного потока и хранит историю в ring buffer.
 
 **AC-1:** `TickMetrics` отдаёт: current TPS, avg MSPT (окно 5с / 1мин / 5мин), p95, p99, max MSPT, длительность последнего тика, uptime. Все значения обновляются без аллокаций в горячем пути.
+
+**AC-1b (добавлено, журнал §13 запись #4):** если сервер заморожен (`/tick freeze`) или у него изменён целевой tickrate (`/tick rate`) через `MinecraftServer.tickRateManager()`, `status`/`explain` явно показывают это состояние и не трактуют пониженный TPS как признак перегрузки в этом случае. Собственный ring buffer TickMetrics — источник для p95/p99/окон; ванильные `MinecraftServer.getTickTimesNanos()`/`getAverageTickTimeNanos()` используются только как кросс-проверка в тестах, не как основной источник данных.
 
 ### FR-2. Профилирование по категориям
 Разбивка времени тика по категориям: `TOTAL`, `ENTITIES`, `BLOCK_ENTITIES`, `SCHEDULED_TICKS`, `RANDOM_TICKS`, `CHUNK_OPS`, `SAVING`, `NETWORK`, `OTHER`.
@@ -187,11 +207,11 @@ curl -s https://meta.fabricmc.net/v2/versions/loader/1.21.1 | head -c 400   # fa
 Пакет `com.tickpilot.api` — стабильная поверхность для других модов.
 
 ```java
-TickPilotApi.registerTaskProfile(Identifier id, TaskProfile profile);
-TickPilotApi.submit(Identifier taskId, Runnable mainThreadWork);
-TickPilotApi.registerPolicy(Identifier id, ThrottlePolicy policy);
-TickPilotApi.markSafeToDefer(Identifier typeId, long maxDelayTicks);
-TickPilotApi.markSafeForAsyncCompute(Identifier typeId);
+TickPilotApi.registerTaskProfile(ResourceLocation id, TaskProfile profile);
+TickPilotApi.submit(ResourceLocation taskId, Runnable mainThreadWork);
+TickPilotApi.registerPolicy(ResourceLocation id, ThrottlePolicy policy);
+TickPilotApi.markSafeToDefer(ResourceLocation typeId, long maxDelayTicks);
+TickPilotApi.markSafeForAsyncCompute(ResourceLocation typeId);
 TickPilotApi.metrics();   // read-only snapshot
 ```
 
@@ -255,7 +275,7 @@ throttle_denylist = []            # эти не трогаются никогд�
 ### FR-18. Разделение сторон
 - `main` entrypoint — только server/common логика.
 - `client` entrypoint — только HUD, клиентские команды, настройки.
-- **Запрещено** упоминать `MinecraftClient` в common/server-классах (ни импорта, ни ссылки).
+- **Запрещено** упоминать `Minecraft` (клиентский класс-синглтон) в common/server-классах (ни импорта, ни ссылки).
 - **Запрещено** загружать client-only классы на dedicated server.
 - Серверные Mixins должны работать и на integrated, и на dedicated server (`"environment": "*"` для server-миксинов, отдельный `tickpilot.client.mixins.json` с `"environment": "client"`).
 - TPS/MSPT измеряются встроенным сервером, а не рендером и не клиентским FPS.
@@ -359,7 +379,7 @@ throttle_denylist = []            # эти не трогаются никогд�
 - [ ] Глубокое профилирование выключено по умолчанию / работает только в sampling.
 - [ ] По умолчанию нет глобального throttling (INV-5).
 - [ ] STRICT полностью отключает вмешательство.
-- [ ] Нет `MinecraftClient` в common/server-коде (проверяется grep'ом).
+- [ ] Нет клиентского класса `Minecraft` в common/server-коде (проверяется grep'ом: `grep -rl "net.minecraft.client.Minecraft" src/main/java/`).
 - [ ] Нет статического состояния, переживающего мир (INV-7).
 - [ ] После остановки сервера не остаётся живых потоков TickPilot.
 - [ ] README покрывает все 13 пунктов раздела 10.
@@ -383,6 +403,9 @@ throttle_denylist = []            # эти не трогаются никогд�
 
 | # | Дата | Вопрос | Решение | Причина |
 |---|---|---|---|---|
-| 1 | | Пример: как измерить время entity ticking | | |
+| 1 | Фаза 1 | Yarn или Mojang mappings? Скелет с fabricmc.net/develop/template собрался на Mojmap, документы были написаны в Yarn-нотации. | Остаёмся на **Mojmap**. Все имена в SPEC/CLAUDE.md обновлены. | Скелет уже собран и рабочий на Mojmap; миграция на Yarn — чистый риск без выгоды; Loom официально поддерживает `loom.officialMojangMappings()` как равноценный путь. |
+| 2 | Фаза 1 | Нет тестовой зависимости в `build.gradle`, а Фаза 3 требует `./gradlew test`. | Добавить `junit-jupiter` (BOM 5.11.x, точную версию зафиксировать перед добавлением) + `test { useJUnitPlatform() }`. | Единственная используемая зависимость; все тестируемые классы (`.metrics`, `.budget`, `.scheduler`, `.config`, `.zones`, `.explain`) не импортируют `net.minecraft.*`, моки не нужны. |
+| 3 | Фаза 1 | `fabric.mod.json` — `license: "CC0-1.0"` из шаблона, SPEC §1 требует MIT. | MIT. Обновить `fabric.mod.json` и файл `LICENSE`. | MIT — более стандартный выбор для Fabric-модов, требует сохранения авторства при копировании, в отличие от CC0. |
+| 4 | Фаза 1 | В FR-1/FR-5 не учтён `TickRateManager` (`/tick freeze`, `/tick rate`, доступен через `MinecraftServer.tickRateManager()`). При заморозке/изменённом tickrate «TPS < 20» перестаёт означать лаг. | Добавлено как дополнение к AC-1 (см. FR-1 ниже): `status`/`explain` должны показывать состояние tickrate/freeze и не интерпретировать это как перегрузку. | Найдено агентом при верификации API на Фазе 1; в исходном SPEC отсутствовало. |
 
 > Правило: каждый раз, когда пришлось отступить от SPEC (например, безопасного hook не нашлось), сюда добавляется строка. Это защищает от «тихих» упрощений.
