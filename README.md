@@ -140,6 +140,29 @@ The level does not chatter on a boundary: leaving a level downwards requires the
 a margin below the threshold *and* the level to have been held for at least five seconds.
 Escalation is immediate, because the input is already a five-second average.
 
+### Warm-up
+
+For the first ten seconds after the server starts, the load level is pinned at NORMAL and no
+transition is logged. The first tick of a starting server genuinely costs on the order of a
+hundred milliseconds, and since the level is driven by a five-second average, that one tick used
+to drag the average above `critical_mspt` and make every single start log a CRITICAL it then
+recovered from.
+
+The measurements are not touched — the slow tick is still recorded, and `status` still shows it as
+the max with its age. Only the *decision* waits until the averaging window is made of ticks from a
+server that has finished starting. While that is happening `status` says so, so a pinned NORMAL is
+never mistaken for a measured one:
+
+```
+Load level: NORMAL (target 40.00 / high 45.00 / critical 50.00 ms)
+Server is warming up - the load level is held at NORMAL for another 5s; the MSPT numbers above are real
+```
+
+The trade is deliberate: a server that is genuinely overloaded from its first tick reports NORMAL
+for ten seconds. Nothing can tell those two cases apart that early, the real MSPT is on screen the
+whole time, and one false CRITICAL per restart is the more expensive mistake. A reload that
+changes the thresholds does **not** start another warm-up — the server is already running.
+
 Load level is **not** the same thing as the adaptive mode (STRICT / BALANCED / AGGRESSIVE). The
 level says how bad things are and is computed; the mode says how far the mod may intervene and is
 chosen by you in `default_mode`. Nothing acts on the mode yet — the policies it governs arrive in

@@ -48,14 +48,17 @@ public final class TickPilotServerState {
 	TickPilotServerState(long startedAtNanos, TickPilotConfig config) {
 		this.startedAtNanos = startedAtNanos;
 		this.config = config;
-		this.budget = newBudget(config, startedAtNanos / NANOS_PER_MILLI);
+		this.budget = newBudget(config, startedAtNanos / NANOS_PER_MILLI,
+				TickBudget.DEFAULT_WARMUP_MILLIS);
 	}
 
-	private static TickBudget newBudget(TickPilotConfig config, long nowMillis) {
-		// FR-15 defines target and critical only; the hysteresis margin and the minimum hold time
-		// are not config keys, so they keep the TickBudget defaults rather than being invented here.
+	private static TickBudget newBudget(TickPilotConfig config, long nowMillis, long warmupMillis) {
+		// FR-15 defines target and critical only; the hysteresis margin, the minimum hold time and
+		// the warm-up window are not config keys, so they keep the TickBudget defaults rather than
+		// being invented here.
 		return new TickBudget(config.targetMspt(), config.criticalMspt(),
-				TickBudget.DEFAULT_HYSTERESIS_MSPT, TickBudget.DEFAULT_MIN_HOLD_MILLIS, nowMillis);
+				TickBudget.DEFAULT_HYSTERESIS_MSPT, TickBudget.DEFAULT_MIN_HOLD_MILLIS,
+				warmupMillis, nowMillis);
 	}
 
 	/**
@@ -104,7 +107,10 @@ public final class TickPilotServerState {
 		this.config = config;
 
 		if (thresholdsChanged) {
-			this.budget = newBudget(config, nowNanos / NANOS_PER_MILLI);
+			// No warm-up: a server being reloaded has been ticking for a while, and suppressing a
+			// genuine CRITICAL for ten seconds after an operator edits the thresholds would hide
+			// exactly the thing they were editing them to see.
+			this.budget = newBudget(config, nowNanos / NANOS_PER_MILLI, 0L);
 		}
 
 		return thresholdsChanged;

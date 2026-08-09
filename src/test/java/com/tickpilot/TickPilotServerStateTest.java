@@ -89,6 +89,26 @@ class TickPilotServerStateTest {
 	}
 
 	@Test
+	void aFreshServerWarmsUp() {
+		TickPilotServerState state = new TickPilotServerState(START_NANOS, TickPilotConfig.defaults());
+
+		assertTrue(state.budget().isWarmingUp(START_NANOS / NANOS_PER_MILLI));
+	}
+
+	@Test
+	void aReloadDoesNotStartAnotherWarmUp() {
+		// A server being reloaded has been ticking for a while. Warming up again would suppress a
+		// genuine CRITICAL for ten seconds right after the operator changed the thresholds.
+		long reloadNanos = START_NANOS + 300_000_000_000L;
+		TickPilotServerState state = new TickPilotServerState(START_NANOS,
+				config("target_mspt = 25.0\ncritical_mspt = 45.0\n"));
+
+		state.reconfigure(config("target_mspt = 30.0\ncritical_mspt = 60.0\n"), reloadNanos);
+
+		assertFalse(state.budget().isWarmingUp(reloadNanos / NANOS_PER_MILLI));
+	}
+
+	@Test
 	void aRejectedConfigStillProducesAUsableBudget() {
 		// AC-15: an inverted pair is repaired by the loader, so TickBudget never sees values its
 		// constructor would refuse.

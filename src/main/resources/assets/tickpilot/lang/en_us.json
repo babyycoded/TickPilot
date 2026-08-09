@@ -7,6 +7,7 @@
 	"command.tickpilot.status.percentiles": "MSPT: p95 %s, p99 %s (last %s)",
 	"command.tickpilot.status.max": "MSPT: max %s, %s ago; p95 %s, p99 %s (history: %s)",
 	"command.tickpilot.status.load": "Load level: %s (target %s / high %s / critical %s ms)",
+	"command.tickpilot.status.warming_up": "Server is warming up - the load level is held at NORMAL for another %s; the MSPT numbers above are real",
 	"command.tickpilot.status.frozen": "Game is frozen by /tick freeze - TPS and MSPT do not reflect server load",
 	"command.tickpilot.status.tickrate": "Target tick rate is set to %s/s by /tick rate - a TPS below 20 here is configured, not overload",
 	"command.tickpilot.reload.created": "%s did not exist and was created with the default settings",

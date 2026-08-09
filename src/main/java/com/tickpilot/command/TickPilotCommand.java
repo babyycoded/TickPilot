@@ -34,6 +34,8 @@ public final class TickPilotCommand {
 	 */
 	private static final int MAX_PROBLEMS_SHOWN = 8;
 
+	private static final long NANOS_PER_MILLI = 1_000_000L;
+
 	private TickPilotCommand() {
 	}
 
@@ -141,7 +143,8 @@ public final class TickPilotCommand {
 				return 0;
 			}
 
-			TickMetricsSnapshot metrics = state.snapshot(System.nanoTime());
+			long nowNanos = System.nanoTime();
+			TickMetricsSnapshot metrics = state.snapshot(nowNanos);
 
 			if (metrics.isEmpty()) {
 				source.sendSuccess(() -> Component.translatable("command.tickpilot.status.no_metrics"), false);
@@ -181,6 +184,14 @@ public final class TickPilotCommand {
 			source.sendSuccess(() -> Component.translatable("command.tickpilot.status.load",
 					Component.translatable(level.translationKey()).withStyle(levelColour(level)),
 					format(budget.targetMspt()), format(budget.highMspt()), format(budget.criticalMspt())), false);
+
+			// A pinned NORMAL must never look like a measured one: the numbers above are real,
+			// the level is not tracking them yet.
+			if (budget.isWarmingUp(nowNanos / NANOS_PER_MILLI)) {
+				source.sendSuccess(() -> Component.translatable("command.tickpilot.status.warming_up",
+						formatDuration(budget.warmupRemainingMillis(nowNanos / NANOS_PER_MILLI)
+								* NANOS_PER_MILLI)).withStyle(ChatFormatting.YELLOW), false);
+			}
 
 			// SPEC AC-1b: say out loud when a low TPS is configured rather than caused by load.
 			if (state.isTickRateFrozen()) {

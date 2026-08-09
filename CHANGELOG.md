@@ -57,14 +57,31 @@ three bad values and one misspelled key logs exactly those four and keeps everyt
 file with a syntax error logs `line 1`, runs on defaults and comes out of the run with an
 unchanged md5.
 
+#### Warm-up period (FR-5, AC-5, AC-16) — closing the Phase 3 deferral
+
+- `TickBudget` now pins the level at NORMAL and reports no transition for the first
+  `DEFAULT_WARMUP_MILLIS` (10 s) after it is created. The startup tick costs ~120 ms, and because
+  the input is a 5 s average that single tick held the average above `critical` for the next five
+  seconds — so every server start logged `NORMAL -> CRITICAL` and then recovered.
+- Ten seconds is twice the smoothing window: five is the minimum for the spike to age out of the
+  average, and the margin covers a start that is slow for more than one tick.
+- **Measurement is untouched.** `TickMetrics` still records the slow tick and `status` still shows
+  it as the max with its age. Only the *decision* waits. To make sure a pinned NORMAL is never
+  mistaken for a measured one, `status` says so while it lasts, with a countdown, in the same
+  spirit as the AC-1b `/tick freeze` line.
+- A budget rebuilt for a config reload gets **zero** warm-up: a running server is already warm,
+  and suppressing a real CRITICAL for ten seconds right after an operator edited the thresholds
+  would hide exactly what they were looking for.
+- Warm-up is latched once it ends, so a clock that steps backwards cannot re-enter it.
+- 8 new `TickBudgetTest` cases and 2 in `TickPilotServerStateTest`, including the exact scenario
+  that failed: 120 ms average from the first update must produce no transition.
+
+Verified on a dedicated server over a 56 s run: no `Load level` line is logged at all, and
+`status` counted down `8s` → `5s` → `2s` before the warm-up line disappeared. The same run before
+the fix logged `NORMAL -> CRITICAL (avg MSPT 51.42)` one second after `Done`.
+
 #### Not implemented / deferred
 
-- **Warm-up period for the load level** — Phase 3 deferred the bogus `NORMAL -> CRITICAL` logged
-  at every server start to this phase, on the grounds that the thresholds were moving into the
-  config anyway. They have, but the fix itself is a `TickBudget` behaviour change rather than a
-  config one and is not part of the FR-15 scope, so it is **still open** and still reproduces
-  (observed again during this phase's manual verification: `Load level NORMAL -> CRITICAL
-  (avg MSPT 51.42)` a second after `Done`).
 - **Configurable permission level for `/tickpilot status`** — FR-12 wants an operator-settable
   level, but FR-15 defines no key for it and this phase does not invent one. Still hard-wired
   to level 0.
@@ -154,15 +171,12 @@ ticks, TickPilot's is the thirteenth-slowest of twelve hundred).
 
 #### Not implemented / deferred
 
-- **False CRITICAL on server startup — Phase 4, warm-up period.** The first tick after
-  `Done (…)!` genuinely costs ~120 ms (measured: 117.37 ms on an idle dedicated server), so every
-  start logs `Load level NORMAL -> CRITICAL` and then recovers to NORMAL about five seconds later.
-  The reading is truthful but useless: nothing is overloaded, the server is still warming up, and
-  one bogus critical line per start is noise that AC-16 exists to prevent. Deliberately not fixed
-  in Phase 3 — the fix changes `TickBudget` behaviour, and its thresholds move into the config
-  file in Phase 4 anyway. Fix it there, together with FR-15: hold the level at NORMAL until the
-  ring buffer holds a minimum number of samples (or a warm-up interval has passed) rather than
-  special-casing the first tick.
+- ~~**False CRITICAL on server startup.**~~ **Fixed in Phase 4** — see "Warm-up period" in the
+  Phase 4 section above. The diagnosis, for the record: the first tick after `Done (…)!` genuinely
+  costs ~120 ms (measured: 117.37 ms on an idle dedicated server), so every start logged
+  `Load level NORMAL -> CRITICAL` and then recovered to NORMAL about five seconds later. The
+  reading was truthful but useless — nothing was overloaded, the server was still warming up, and
+  one bogus critical line per start is exactly the noise AC-16 exists to prevent.
 - **Thresholds are not configurable yet** — `TickBudget` takes target, critical, hysteresis and
   hold time as constructor arguments and validates them, but the server wires in the SPEC defaults
   because the config file arrives with FR-15 in Phase 4.
