@@ -154,6 +154,15 @@ public final class TickMetrics {
 	}
 
 	/**
+	 * @return duration of the most recently completed tick in nanoseconds, or 0 if none. This is
+	 *         the TOTAL the profiler subtracts its categories from (SPEC AC-2), which needs the
+	 *         raw value rather than the rounded millisecond one.
+	 */
+	public long lastDurationNanos() {
+		return lastDurationNanos;
+	}
+
+	/**
 	 * Mean tick duration over the given window.
 	 *
 	 * @param windowNanos length of the window ending at {@code nowNanos}
