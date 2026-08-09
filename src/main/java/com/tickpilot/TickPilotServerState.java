@@ -4,6 +4,7 @@ import com.tickpilot.budget.LoadLevel;
 import com.tickpilot.budget.LoadLevelTransition;
 import com.tickpilot.budget.TickBudget;
 import com.tickpilot.config.TickPilotConfig;
+import com.tickpilot.metrics.OverheadMeter;
 import com.tickpilot.metrics.TickMetrics;
 import com.tickpilot.metrics.TickMetricsSnapshot;
 import com.tickpilot.profiler.CostTracker;
@@ -42,6 +43,7 @@ public final class TickPilotServerState {
 	private final TickMetrics metrics = new TickMetrics();
 	private final TickProfiler profiler = new TickProfiler();
 	private final CostTracker costs = new CostTracker();
+	private final OverheadMeter overhead = new OverheadMeter();
 
 	private volatile TickPilotConfig config;
 	private volatile TickBudget budget;
@@ -66,6 +68,21 @@ public final class TickPilotServerState {
 		this.sessionActive = config.samplingEnabled();
 		this.profiler.setCostSink(this.costs);
 		declareProfiledCategories(this.profiler);
+	}
+
+	/** @return the meter for TickPilot's own cost (SPEC INV-10, FR-12) */
+	public OverheadMeter overhead() {
+		return overhead;
+	}
+
+	/**
+	 * Records one slice of TickPilot's own work. Called twice per tick, once around each half of
+	 * the tick listener (SPEC INV-10).
+	 *
+	 * @param nanos time spent inside the mod's own code
+	 */
+	void recordOverhead(long nanos) {
+		overhead.record(nanos);
 	}
 
 	/** @return the per-type cost aggregation owned by this server (SPEC FR-3) */
@@ -362,6 +379,7 @@ public final class TickPilotServerState {
 		sessionEndNanos = 0L;
 		profiler.resetSession();
 		costs.reset();
+		overhead.reset();
 		metrics.reset();
 	}
 }
