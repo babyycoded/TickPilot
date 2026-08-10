@@ -22,6 +22,7 @@ import com.tickpilot.metrics.TickMetricsSnapshot;
 import com.tickpilot.profiler.CostTracker;
 import com.tickpilot.profiler.TickCategory;
 import com.tickpilot.profiler.TickProfiler;
+import com.tickpilot.scheduler.SchedulerStats;
 
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 
@@ -349,12 +350,56 @@ public final class TickPilotCommand {
 	}
 
 	/**
+	 * The deferred-task lines of SPEC FR-12 and AC-13, shared by {@code status} and
+	 * {@code explain} so both report the queue the same way.
+	 *
+	 * <p>A server where no mod uses the API says so instead of printing a row of zeros: "nobody
+	 * submitted anything" and "the queue is keeping up" are different facts, and only the second
+	 * one is about performance.
+	 */
+	private static void sendSchedulerLine(CommandSourceStack source, TickPilotServerState state) {
+		SchedulerStats scheduler = state.scheduler().stats();
+
+		if (scheduler.isUnused()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.scheduler.idle",
+					scheduler.maxQueued()).withStyle(ChatFormatting.GRAY), false);
+			return;
+		}
+
+		source.sendSuccess(() -> Component.translatable("command.tickpilot.scheduler",
+				scheduler.queued(), scheduler.maxQueued(), scheduler.peakQueued(),
+				scheduler.executedFromQueue(), scheduler.executedForced(),
+				format(scheduler.msptPerTick())), false);
+
+		if (scheduler.lost() > 0L) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.scheduler.lost",
+					scheduler.dropped(), scheduler.rejected(), scheduler.discarded())
+					.withStyle(ChatFormatting.YELLOW), false);
+		}
+
+		if (scheduler.failed() > 0L) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.scheduler.failed",
+					scheduler.failed()).withStyle(ChatFormatting.YELLOW), false);
+		}
+
+		if (scheduler.emergency()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.scheduler.emergency")
+					.withStyle(ChatFormatting.RED), false);
+		}
+
+		if (!state.scheduler().isDeferralEnabled()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.scheduler.disabled")
+					.withStyle(ChatFormatting.GRAY), false);
+		}
+	}
+
+	/**
 	 * The human-readable breakdown of SPEC FR-13 (SPEC FR-12 {@code /tickpilot explain}).
 	 *
 	 * <p>Everything AC-13 lists is printed from something that was measured, and everything that
 	 * was not measured says so instead of showing a zero: a server with no profiling session gets
-	 * one honest line where the category breakdown would be, and the deferred-task count is
-	 * {@code n/a} because the scheduler of FR-6 does not exist yet.
+	 * one honest line where the category breakdown would be, and a server where no mod uses the
+	 * scheduler API says that rather than printing an empty queue.
 	 *
 	 * <p>The single recommendation and its effect estimate come from {@link ExplainAdvisor}, which
 	 * holds the whole decision table and is unit-tested without the game.
@@ -472,10 +517,9 @@ public final class TickPilotCommand {
 					format(state.tickRate())).withStyle(ChatFormatting.YELLOW), false);
 		}
 
-		// AC-13 asks for the deferred task count. FR-6 has not been built, so the honest answer is
-		// that there is no queue - not a zero, which would read as a measured empty one.
-		source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.deferred_unavailable")
-				.withStyle(ChatFormatting.GRAY), false);
+		// AC-13 asks for the deferred task count. Since FR-6 exists there is a real queue to count,
+		// and a zero here now means a measured empty queue rather than a missing feature.
+		sendSchedulerLine(source, state);
 	}
 
 	/**
@@ -786,6 +830,9 @@ public final class TickPilotCommand {
 							.withStyle(ChatFormatting.GRAY), false);
 				}
 			}
+
+			// SPEC FR-12: `status` reports the deferred task queue of FR-6.
+			sendSchedulerLine(source, state);
 
 			// SPEC AC-1b: say out loud when a low TPS is configured rather than caused by load.
 			if (state.isTickRateFrozen()) {

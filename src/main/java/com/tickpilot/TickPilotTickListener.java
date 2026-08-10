@@ -150,11 +150,26 @@ final class TickPilotTickListener {
 						String.format(Locale.ROOT, "%.2f", transition.avgMspt()));
 			}
 
-			// Last, so the measurement covers everything this half of the listener did, the
-			// end-of-session report included (SPEC INV-10).
+			// Last of TickPilot's own work, so the measurement covers everything this half of the
+			// listener did, the end-of-session report included (SPEC INV-10).
 			state.recordOverhead(System.nanoTime() - nowNanos);
+
 		} catch (Throwable t) {
 			state.disable("tick end measurement failed: " + t);
+			return;
+		}
+
+		// Deliberately outside the overhead measurement: what runs here is other mods' work,
+		// submitted through the API, and charging it to TickPilot's overhead would misreport both
+		// (SPEC FR-6, INV-10). The scheduler times itself; `status` prints that separately.
+		//
+		// Its own try/catch as well: a task that throws is already caught inside the scheduler, so
+		// anything arriving here is a failure of the scheduler itself and must not be reported as
+		// a measurement failure (SPEC INV-9).
+		try {
+			state.runScheduledWork();
+		} catch (Throwable t) {
+			state.disable("adaptive scheduler failed: " + t);
 		}
 	}
 }

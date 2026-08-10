@@ -5,6 +5,136 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
 
 ## Unreleased
 
+### Phase 7 — public API and adaptive scheduler (FR-14, FR-6, AC-14, AC-6)
+
+- **`com.tickpilot.api` is the published surface**: `TickPilotApi` with the six methods of FR-14,
+  plus `TaskProfile`, `TaskPriority`, `SubmitResult`, `ThrottlePolicy`, `ThrottleAdvice`,
+  `ServerLoad` and `TickPilotMetrics`. Everything public carries Javadoc.
+- **AC-14 is enforced by a test, not by review.** `ApiSurfaceTest` walks every public and protected
+  member of the package — return types, parameters, fields, thrown types, generic arguments, and
+  implemented interfaces — and fails the build if any of them names a `com.tickpilot` class outside
+  `api`. That is why `ServerLoad` and `TickPilotMetrics` exist as their own types instead of
+  exposing `LoadLevel` and `TickMetricsSnapshot`: a consumer compiles against the API package alone.
+  A second test keeps `ServerLoad` in step with `LoadLevel`, and the mapping between them is an
+  exhaustive `switch`, so adding a level internally breaks the build rather than misreporting.
+- **`com.tickpilot.scheduler.AdaptiveScheduler` implements all four guarantees of AC-6.** Bounded by
+  `max_deferred_tasks`; drained by priority and, within a priority, in submission order; every task
+  whose `maxDelayTicks` has elapsed runs on the next tick *before* the priority drain and
+  *regardless* of the time budget; and an overflow drops the least urgent queued task for a more
+  urgent submission, or refuses the submission outright, instead of growing.
+- **Two indexes over the same entries, not a `PriorityQueue`.** An intrusive FIFO list per priority
+  gives O(1) "next to run" and O(1) "least urgent, oldest" for the eviction victim; a binary
+  min-heap keyed by (deadline, submission order) gives O(log n) "what has expired". Deadlines are
+  not monotonic within a priority — a task submitted later with a shorter deadline expires earlier —
+  so one ordering cannot serve both, and lazy deletion would leave dead entries piling up in a
+  priority that is never drained. Each entry knows its own links and heap slot, so removal through
+  one index removes it from the other. That is the difference between bounding live tasks and
+  bounding memory.
+- **Critical work never enters the queue.** It runs inside `submit`, so no later decision —
+  priority, deadline, overflow — can apply to it. A test submits critical work into a queue that is
+  completely full and asserts it still runs and that nothing was dropped.
+- **`submit` off the server thread is refused, not helped** (`WRONG_THREAD`; §13 entry #16). The
+  check runs before a single field of the scheduler is read, so the queue stays single-threaded by
+  construction rather than by convention. Running the work there would breach INV-1/INV-2; queueing
+  it would corrupt a structure that has no locks. The caller is told by a return value, never by an
+  exception — an exception inside a tick would take the server down over another mod's mistake.
+- **Nothing in the API ever throws at a consumer.** Contradictory profiles are normalised at
+  construction (`critical` wins over `deferrable`, a negative deadline becomes "next tick", a
+  deadline beyond 6000 ticks is clamped so the starvation guarantee cannot be opted out of), and a
+  `null` argument is logged with a cooldown and ignored.
+- **`coalescable` is implemented rather than stored.** A second submission of a queued coalescable
+  task replaces its work and keeps the earlier position and deadline — the semantics of "dirty
+  again", which is also why coalescing cannot starve anything.
+- **STRICT defers nothing.** Holding another mod's work back is an intervention, and FR-11 says
+  STRICT performs none, so every submission runs immediately there. Work queued before the switch
+  still drains; a mode change never strands it.
+- **The tick budget is `target_mspt − reserve_mspt` minus what the tick just cost.** Deferred work
+  runs after the tick has been measured and after TickPilot's own overhead has been recorded, so it
+  distorts neither: it is other mods' time, and charging it to the INV-10 figure would misreport
+  both. It gets its own line in `status`.
+- **Shutdown discards queued work rather than running it.** Executing other mods' tasks against a
+  world being torn down is a worse answer than losing work that was, by its own profile, allowed to
+  be late. Critical work never enters the queue and so cannot be lost this way. Said out loud in the
+  API documentation and the README, not left to be discovered.
+- `max_deferred_tasks` now applies on `/tickpilot reload` without a restart; lowering it drops the
+  least urgent queued tasks immediately, because an operator lowering a bound is asking for it to
+  hold now.
+- Registrations live in `com.tickpilot.policy.PolicyRegistry`, which **deliberately outlives a
+  world** — argued in full in §13 entry #15. Keyed by id, so re-registration replaces rather than
+  accumulates; holds no reference to any game object; the state that does belong to a world, the
+  queue, stays in `TickPilotServerState` and dies with it.
+- `status` and `explain` print the queue: depth, cap, peak, how many ran, how many were forced by
+  their deadline, and its cost in ms/tick, plus separate lines for dropped, refused and failed work.
+  A server where no mod uses the API says so instead of printing zeros. **This closes the Phase 6
+  item "Deferred task count is `n/a`, not `0`"** — there is a real queue to count now, and a zero
+  there is a measured empty queue.
+- 52 new unit tests (29 for the scheduler); suite total 229.
+
+#### Verified on a dedicated server
+
+Live `./gradlew runServer` runs with Lithium 0.15.4 also installed. The mod loads, `status` and
+`explain` report the queue cap read from the config, `/tickpilot reload` goes through the new
+reconfigure path without error, and the server stops cleanly.
+
+All four AC-6 guarantees were then driven through the real tick listener with the real time budget,
+not only through the synthetic clock of the unit tests. A throwaway `/tickpilot debugload <n>`
+command stood in for the consumer mod that does not exist yet: it registered three profiles (HIGH
+and NORMAL at a 600-tick deadline, LOW at 3) and submitted stub tasks costing about 1 ms each
+through the real `TickPilotApi.submit`. It was **deleted before this commit** and is not part of
+the mod; the numbers below are from its runs.
+
+**Overflow, with `max_deferred_tasks = 100`.** 500 submissions returned `DEFERRED=183,
+REJECTED_QUEUE_FULL=317`. Of the 183 accepted, 83 were later dropped to make room for more urgent
+submissions and 100 ran. Peak queue depth was exactly 100 — the cap held under a flood four times
+its size, which is the difference AC-6 is about. The overflow warning appeared once, at the first
+drop, and the recovery line once, when the queue fell back below its mark.
+
+**Both overflow answers were exercised.** LOW tasks were evicted by later HIGH ones (`dropped`),
+and submissions with nothing less urgent to displace were refused outright (`rejected`) — the
+refusal that keeps submission order meaningful under sustained pressure.
+
+**Starvation protection, with the cap raised out of the way.** 2000 submissions, of which 666 were
+LOW with a 3-tick deadline, made on scheduler tick 484. Every one of the 666 ran on tick **487** —
+their deadline, exactly, not one earlier and not one later — while 1073 more urgent tasks were
+still queued. The status line taken at that moment reads `1073 queued of 10000 max, peak 2000; 927
+run so far (666 forced by their deadline)`: of the 927 that had run, 666 were forced LOW ones that
+jumped a queue full of HIGH and NORMAL work with 600-tick deadlines. The whole 2000 drained in
+about 3.5 s at roughly 29 tasks per tick, which is the 30 ms budget spending itself on 1 ms tasks.
+
+**A consequence worth stating: forced work ignores the budget, so it can stall a tick.** When all
+666 LOW tasks expired in the same tick they all ran in that tick — about 0.7 s of work — and the
+next `status` showed TPS 17.95. That is AC-6 doing exactly what it says rather than a defect: the
+deadline is chosen by the mod that submitted the work, and honouring it is the guarantee. The
+lesson for a consumer is that a short `maxDelayTicks` on a large batch is a promise to run all of it
+at once.
+
+**And a second one: MSPT does not include deferred work.** Through that same stall MSPT read 0.06
+and 0.23 ms, because the scheduler runs after the tick has been measured. The cost is not hidden —
+it is on the scheduler's own line, which read 1.90 then 3.57 ms/tick — but an operator looking only
+at MSPT would not see it. That is the deliberate trade described above: including it would charge
+other mods' time to TickPilot's own overhead figure and let a mod's deferred work drive the load
+level. TPS, which is wall-clock, does show it.
+
+#### Not implemented / deferred
+
+- **No registered `ThrottlePolicy` is consulted by anything.** Entity and block entity throttling is
+  FR-8 and FR-9, Phase 8. The same is true of `markSafeToDefer` and `markSafeForAsyncCompute`: both
+  are recorded, neither changes behaviour. This is stated in the Javadoc of each, in a log line
+  written at registration, and in the README, so that "my policy does nothing" cannot be mistaken
+  for a broken integration.
+- **`asyncComputeAllowed` changes nothing and is not a promise that it ever will.** INV-1 forbids
+  touching the world off the server thread at all, and separating a type's computation from its
+  world access is not something a flag can do on its owner's behalf.
+- **No consumer mod exists.** The live runs above used a throwaway command that was deleted before
+  the commit, which covers everything except what only a real integration can show: coalescing and
+  the wrong-thread refusal were not exercised live, and neither was the soft-dependency pattern in
+  the README. Those remain unit-tested and reviewed only. For the integration checklist, alongside
+  the two items deferred in Phase 6 for the same reason.
+- **No off-thread submission path.** A background thread cannot hand work to TickPilot; it is
+  refused with `WRONG_THREAD`. An MPSC inbox is neither in FR-6 nor in FR-14, and writing concurrent
+  code at the end of a phase to serve a consumer that does not exist would be the wrong trade
+  (§13 entry #16).
+
 ### Phase 6 — `/tickpilot explain` (FR-13, AC-13)
 
 - `/tickpilot explain` (permission level 2) prints everything AC-13 lists — TPS, average MSPT, p95,
