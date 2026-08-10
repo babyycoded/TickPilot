@@ -10,7 +10,8 @@
 		"ServerConnectionListenerMixin",
 		"ServerLevelChunkTickMixin",
 		"LevelChunkBoundTickerMixin",
-		"ServerLevelEntityTickMixin"
+		"ServerLevelEntityTickMixin",
+		"MobServerAiStepMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

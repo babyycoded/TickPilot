@@ -5,6 +5,171 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
 
 ## Unreleased
 
+### Phase 8a — activity zones and throttling diagnostics (FR-7, FR-11, AC-7, AC-11)
+
+The first half of the riskiest phase, and it deliberately changes nothing about what the game does.
+Every candidate object is put through the real policy on the real tick, the verdict is counted, and
+then discarded. Nothing is skipped, no control flow is touched, and `cancellable` appears nowhere.
+That order is SPEC INV-3 applied to the work rather than only to a config flag: the half that skips
+ticks starts from measured numbers instead of an expectation.
+
+- `com.tickpilot.zones.ActivityZone` and `ZoneResolver` implement the FR-7 distance table. The
+  answer is cached **per chunk per tick** — one hash and an array read in the hot path — because
+  answering per object would cost one distance computation per player per object per tick.
+- **Two approximations, both pointing the same way.** Distance is measured to the *nearest point of
+  the chunk* rather than its centre, and only horizontally. Both under-estimate, so an object is
+  never placed in a farther zone than it belongs to; a mob two hundred blocks below a player in the
+  same column counts as FULL. Caching per chunk and honouring height are not compatible, and of the
+  two directions only one is safe.
+- **An empty world is not a frozen one** (AC-7). With no players every chunk answers FULL. "Nobody
+  is near" and "nobody is here" are different facts, and confusing them stops every farm and chunk
+  loader on the server the moment its owner logs off.
+- `com.tickpilot.policy.TickPolicy` is the single decision, a pure function of seven values. The
+  order of its checks is part of the contract because it decides what the diagnostics say, and the
+  **load level is checked last** on purpose: "everything agrees except that the server is healthy"
+  is the one count that says what thinning would actually buy.
+- The verdict is an enum, not a record, so the reason travels with the decision at no allocation
+  cost — it is produced once per object per tick (INV-6).
+- Id lists are resolved into registry objects once per config load, so membership is a hash lookup
+  rather than a string comparison in the hot path. An entry matching no registered type is now
+  reported: an allowlist with a typo in it is inert, and an operator who is not told will believe
+  they configured something they did not.
+- The decision is taken **inside the profiler's own injector**, not in a second Mixin on the same
+  instruction. Two injectors at one HEAD have no defined order between them, and once this call can
+  cancel the tick, an order that opened the profiler's frame first would leave it unclosed.
+- 29 new unit tests; suite total 258. Two of them walk the **whole** input space (288 combinations)
+  rather than sampling it: `strictModeIsExhaustivelyInert` and
+  `nothingIsEverEligibleWithoutTheOperatorsAllowlist`. INV-5 holds by construction — there is no
+  path to an eligible verdict without the operator's allowlist.
+
+#### What was verified live, and what was not
+
+This distinction matters more than usual here, because the phase will later look fully verified
+when half of its decision space has never run on a server.
+
+**Verified on a live dedicated server** (`runServer` with Lithium 0.15.4 also installed):
+
+- the hooks fire on every entity and block entity, and the counters produce real per-tick rates;
+- **the FULL zone rule of AC-7** — a server with no players thinned nothing, and every object not
+  otherwise protected reported "in the FULL zone";
+- **the force-loaded protection of INV-8** — with nine chunks force-loaded, exactly the objects
+  inside them reported as protected (2.40 entities and 0.82 block entities per tick);
+- `0.00/tick would be eligible` on a default install, which is INV-5 and INV-3 on a real server
+  rather than in a test;
+- config reload rebuilding the id lists and the radii, and the tally being cleared with it;
+- TickPilot's own overhead unchanged at 0.01 ms/tick with the diagnostics running on every object.
+
+**Never run on a server, unit-tested only:** the **REDUCED and FROZEN zones**, the **allowlist
+branch**, and the **load-level branch**. All three need a connected player — without one every
+chunk is FULL by AC-7, so the other branches are unreachable from a console-driven run. There is no
+client automation available here, so they are covered exhaustively by the 288-combination walk and
+by nothing else. They stay on the integration checklist until a real client run happens; do not
+read "phase 8 verified" as covering them.
+
+**One correction made during the run.** The first version of the output named only the single
+commonest reason, which reported "protected object" without saying *which* protection — a failure
+of exactly the thing the diagnostics exist for. It now prints the full breakdown by reason, which
+answered the question immediately (it was the force-load).
+
+#### Type-by-type reading (SPEC FR-8, FR-9)
+
+Every candidate was read in the decompiled 1.21.1 source and classified against three failure
+modes, of which only the first was anticipated: **(A) counter drift**, **(B) missed window**, **(C)
+no server ticker at all**.
+
+Block entities — of seven types read, **none qualifies unconditionally**:
+
+| Type | Mode | Evidence |
+|---|---|---|
+| `hopper` | A — refused | `cooldownTime--`, `HopperBlockEntity:96` |
+| `furnace`, `blast_furnace`, `smoker` | A — refused | `litTime--:256`, `cookingProgress++:289` |
+| `brewing_stand` | A — refused | `brewTime--:104`, `fuel--:114` |
+| `campfire` | A — refused | `cookingProgress[i]++:51` |
+| `mob_spawner` | A — refused | `spawnDelay--` in `BaseSpawner.serverTick`, already gated on `isNearPlayer` by vanilla |
+| `beacon` | B — conditional | effects on `getGameTime() % 80 == 0`, `BeaconBlockEntity:167` |
+| `conduit` | B — conditional | `getGameTime() % 40 == 0` |
+| `chest` | C — not applicable | `ChestBlock.getTicker:303` returns `null` on the server; chests do not tick there at all |
+
+Mode B is the one worth remembering: a ticker gated on **absolute** game time does not drift, but a
+skip landing on the gate tick **loses** the work until the next multiple. Beacon effects would lapse
+rather than arrive late.
+
+Mobs — a structural finding that moves the whole group the *other* way: `serverAiStep()` is called
+from `LivingEntity.aiStep()`, and breeding (`Animal.aiStep`, `inLove--`) and growth
+(`AgeableMob.aiStep`, `setAge`) live in the caller. So skipping AI leaves age, breeding, physics,
+`travel()`, fish flopping and squid propulsion running at full rate; only goals, navigation, sensing
+and the movement controllers are thinned.
+
+| Type | Verdict | Note |
+|---|---|---|
+| `pig`, `cow`, `sheep`, `chicken` | candidates | age and breeding provably untouched |
+| `bat` | candidate | probabilistic logic, no counters |
+| `squid`, `glow_squid` | candidate, visible behaviour | direction comes from a goal, propulsion from `aiStep`: a thinned squid **keeps swimming in a straight line** on its last heading |
+| `cod`, `salmon`, `tropical_fish`, `pufferfish` | candidates | bucketed fish are persistent and so already protected |
+| `villager` | refused without reading | brain, POI, trading, schedule — four independent reasons |
+
+**Nothing has been written to the README and nothing has been added to the shipped allowlist**, which
+stays empty. Per the agreed process a type only reaches the README after a live behavioural
+comparison, which cannot happen until the half that actually skips ticks exists.
+
+### Phase 8b — mob AI thinning (FR-8, AC-8)
+
+- **The thinning step is a staggered grid**, SPEC §13 entry #17: an object runs when
+  `(gameTime + phase) % interval == 0`, with the phase taken from the entity id. The obvious
+  `gameTime % interval == 0` would put every thinned object on the same tick — four times the work
+  on one tick in four — which is exactly the shape Phase 7 measured when 666 deferred tasks shared a
+  deadline. Vanilla stages goal re-evaluation the same way inside the very method being hooked
+  (`(tickCount + getId()) % 2`).
+- **Block entity throttling is not implemented**, SPEC §13 entry #18. Of eight types read, five
+  drift on a counter, one has no server ticker at all, and the two survivors (`beacon`, `conduit`)
+  are gated on absolute game time and would need phase-alignment machinery whose only beneficiaries
+  are two rare, cheap blocks. Diagnostics only, per INV-4.
+- `MobServerAiStepMixin` cancels `Mob.serverAiStep()` at HEAD — the mod's **only** cancelling hook.
+  It does nothing unless the operator both raises `min_entity_update_interval_ticks` above 1 and puts
+  the type on `throttle_allowlist`, and STRICT disables it outright. A mob with an attack target is
+  never thinned even then.
+- 8 new unit tests; suite total 266.
+
+#### Verified with a real client connected
+
+Three headless attempts failed first, and the reason is worth recording because it will catch anyone
+who tries to verify this from a console: on a server **with no players**, "ticked by vanilla" and
+"eligible for thinning" are mutually exclusive. Force-loading a chunk keeps mobs ticking but makes
+them protected under INV-8; without force-load the startup chunk ticket expires about a minute after
+boot and vanilla stops ticking them entirely (the probe's `Age` froze while TickPilot reported
+`0.00/tick actually skipped` — the freeze was vanilla's, not the mod's). Raising `spawnChunkRadius`
+did not help either.
+
+The way through is a real client, and it needs no GUI automation: the client is launched with
+`--quickPlayMultiplayer localhost:25565`, joins by itself, and stands still. A stationary player
+keeps everything within `simulation-distance` (10 chunks, 160 blocks) ticking, which is wider than
+`reduced_radius` (96), so a mob summoned 120 blocks away is **ticked by vanilla and in the FROZEN
+zone at the same time**. Lithium has to be moved out of `run/mods` for the run — server and client
+race to remap it and the second one fails on a file lock.
+
+Two runs, `min_entity_update_interval_ticks = 4`, `throttle_allowlist = ["minecraft:pig"]`, thresholds
+lowered so the server held CRITICAL:
+
+| Run | Eligible | AI reached schedule | Actually skipped | Expected (eligible × ¾) |
+|---|---|---|---|---|
+| A | 7.00/tick | 24.00/tick | **5.25/tick** | 5.25 |
+| B | 4.00/tick | 9.92/tick | **2.99/tick** | 3.00 |
+
+So the cancel path executes on a live server, and the staggered grid skips exactly three ticks in
+four of the eligible mobs — twice, to the hundredth. Mobs that reached the schedule but were not
+eligible (17 of 24 in run A) were untouched, which is the allowlist and the zone doing their job on
+real objects. With the shipped default of `interval = 1` the `Mob AI` line does not appear at all:
+nothing reaches the schedule, which is INV-3 observed rather than asserted. No crash, no Mixin
+failure, TPS held at 20.
+
+**Still not verified live: that growth and breeding are untouched.** The probe needed a baby pig and
+the `{Age:-24000}` NBT did not take through the command chain in either attempt, so what was measured
+was an adult pig's `Age` staying at 0 — which proves nothing. That breeding (`Animal.aiStep`) and
+growth (`AgeableMob.aiStep`) sit in the *caller* of the hooked method remains a reading of the
+decompiled source, not a measurement. It is the one claim behind the "passive animals are good
+candidates" conclusion, so it stays on the integration checklist and no type is recommended in the
+README on the strength of it.
+
 ### Phase 7 — public API and adaptive scheduler (FR-14, FR-6, AC-14, AC-6)
 
 - **`com.tickpilot.api` is the published surface**: `TickPilotApi` with the six methods of FR-14,
