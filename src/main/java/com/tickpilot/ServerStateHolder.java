@@ -21,6 +21,20 @@ import net.minecraft.server.MinecraftServer;
 public final class ServerStateHolder {
 	private static final ServerStateRegistry<MinecraftServer, TickPilotServerState> REGISTRY = new ServerStateRegistry<>();
 
+	/**
+	 * The server that is running right now, or {@code null} between worlds.
+	 *
+	 * <p>Needed because the public API of SPEC FR-14 takes no server argument — a mod calling
+	 * {@code TickPilotApi.submit} has one server to mean, and asking it to name it would be
+	 * ceremony. At most one server exists at a time in both environments TickPilot supports: a
+	 * dedicated server is the process, and a singleplayer world has exactly one integrated server.
+	 *
+	 * <p>{@code volatile} because it is written on the lifecycle thread and read from the API,
+	 * which a mod may call from anywhere. Cleared when the server it names goes away, so it can
+	 * never hand out a stopped server (SPEC INV-7, AC-19).
+	 */
+	private static volatile MinecraftServer currentServer;
+
 	private ServerStateHolder() {
 	}
 
@@ -32,7 +46,27 @@ public final class ServerStateHolder {
 	 * @return the newly created state
 	 */
 	public static TickPilotServerState create(MinecraftServer server, TickPilotConfig config) {
-		return REGISTRY.create(server, key -> new TickPilotServerState(System.nanoTime(), config));
+		TickPilotServerState state = REGISTRY.create(server,
+				key -> new TickPilotServerState(System.nanoTime(), config));
+		currentServer = server;
+		return state;
+	}
+
+	/**
+	 * @return the server that is running right now, or {@code null} when none is. Used by the
+	 *         public API, whose methods take no server argument (SPEC FR-14)
+	 */
+	public static MinecraftServer currentServer() {
+		return currentServer;
+	}
+
+	/**
+	 * @return the state of the running server, or {@code null} when no server is running or
+	 *         TickPilot holds no state for it
+	 */
+	public static TickPilotServerState current() {
+		MinecraftServer server = currentServer;
+		return server == null ? null : REGISTRY.get(server);
 	}
 
 	/**
@@ -49,6 +83,7 @@ public final class ServerStateHolder {
 	 * the normal stop path.
 	 */
 	public static TickPilotServerState remove(MinecraftServer server) {
+		clearCurrent(server);
 		return REGISTRY.remove(server);
 	}
 
@@ -56,10 +91,21 @@ public final class ServerStateHolder {
 	 * Shuts down and removes the state for {@code server}. Safe to call when no state exists.
 	 */
 	public static void shutdown(MinecraftServer server) {
+		clearCurrent(server);
 		TickPilotServerState state = REGISTRY.remove(server);
 
 		if (state != null) {
 			state.shutdown();
+		}
+	}
+
+	/**
+	 * Forgets the running server, but only if it is the one being stopped: a state removed for
+	 * some other reason must not blank out a server that is still ticking.
+	 */
+	private static void clearCurrent(MinecraftServer server) {
+		if (currentServer == server) {
+			currentServer = null;
 		}
 	}
 

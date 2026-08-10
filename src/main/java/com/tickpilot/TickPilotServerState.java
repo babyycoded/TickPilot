@@ -3,6 +3,7 @@ package com.tickpilot;
 import com.tickpilot.budget.LoadLevel;
 import com.tickpilot.budget.LoadLevelTransition;
 import com.tickpilot.budget.TickBudget;
+import com.tickpilot.config.AdaptiveMode;
 import com.tickpilot.config.TickPilotConfig;
 import com.tickpilot.metrics.OverheadMeter;
 import com.tickpilot.metrics.TickMetrics;
@@ -11,6 +12,9 @@ import com.tickpilot.profiler.CostTracker;
 import com.tickpilot.profiler.ProfilerHook;
 import com.tickpilot.profiler.TickCategory;
 import com.tickpilot.profiler.TickProfiler;
+import com.tickpilot.scheduler.AdaptiveScheduler;
+
+import net.minecraft.resources.ResourceLocation;
 
 /**
  * Owns all TickPilot state belonging to exactly one running server.
@@ -23,9 +27,12 @@ import com.tickpilot.profiler.TickProfiler;
  * snapshot (FR-15). The profiler (FR-2) and the scheduler (FR-6) are added in later phases and
  * will be owned by this class too.
  *
- * <p>Deliberately free of {@code net.minecraft} imports: the tick rate manager state arrives as
- * primitives through {@link #onTickRateState(boolean, boolean, float)}, so the whole state object
- * stays unit-testable. {@link TickPilotTickListener} is the Minecraft-facing side.
+ * <p>The tick rate manager state arrives as primitives through
+ * {@link #onTickRateState(boolean, boolean, float)}, so the whole state object stays unit-testable;
+ * {@link TickPilotTickListener} is the Minecraft-facing side. The one {@code net.minecraft}
+ * reference is the {@code ResourceLocation} type argument of the scheduler, which exists only in a
+ * generic signature and is erased at compile time, so constructing this class in a test still loads
+ * no game class.
  *
  * <h2>Threading</h2>
  * Tick measurement is written from the server thread only. The status command reads from the
@@ -44,6 +51,7 @@ public final class TickPilotServerState {
 	private final TickProfiler profiler = new TickProfiler();
 	private final CostTracker costs = new CostTracker();
 	private final OverheadMeter overhead = new OverheadMeter();
+	private final AdaptiveScheduler<ResourceLocation> scheduler;
 
 	private volatile TickPilotConfig config;
 	private volatile TickBudget budget;
@@ -68,6 +76,56 @@ public final class TickPilotServerState {
 		this.sessionActive = config.samplingEnabled();
 		this.profiler.setCostSink(this.costs);
 		declareProfiledCategories(this.profiler);
+
+		this.scheduler = new AdaptiveScheduler<>(config.maxDeferredTasks(), System::nanoTime,
+				schedulerEvents());
+		this.scheduler.setDeferralEnabled(deferralAllowed(config));
+	}
+
+	/** @return the queue of deferred API tasks owned by this server (SPEC FR-6) */
+	public AdaptiveScheduler<ResourceLocation> scheduler() {
+		return scheduler;
+	}
+
+	/**
+	 * Whether another mod's work may be held back at all.
+	 *
+	 * <p>STRICT is the compatibility mode and performs no intervention whatsoever (SPEC FR-11), and
+	 * delaying somebody else's work is an intervention — the most visible kind there is. With
+	 * adaptive mode off, or in STRICT, every submission runs immediately, which is exactly what
+	 * would happen with TickPilot absent.
+	 */
+	private static boolean deferralAllowed(TickPilotConfig config) {
+		return config.enableAdaptiveMode() && config.effectiveMode() != AdaptiveMode.STRICT;
+	}
+
+	/**
+	 * Turns the scheduler's rare events into log lines. The cooldown is the scheduler's, so this
+	 * writes whatever it is given (SPEC AC-16, INV-9).
+	 */
+	private static AdaptiveScheduler.Events<ResourceLocation> schedulerEvents() {
+		return new AdaptiveScheduler.Events<>() {
+			@Override
+			public void taskFailed(ResourceLocation taskId, Throwable failure, long totalFailures) {
+				TickPilot.LOGGER.warn("Deferred task {} threw; TickPilot caught it and carried on "
+						+ "({} failed tasks so far). This is a bug in the mod that submitted it",
+						taskId, totalFailures, failure);
+			}
+
+			@Override
+			public void overflow(int queued, int maxQueued, long totalDropped, long totalRejected) {
+				TickPilot.LOGGER.warn("Deferred task queue is full ({}/{}); work is being dropped "
+						+ "by priority instead of queued indefinitely - {} dropped, {} refused so "
+						+ "far. Raise max_deferred_tasks or find the mod that is submitting more "
+						+ "than the server can run", queued, maxQueued, totalDropped, totalRejected);
+			}
+
+			@Override
+			public void recovered(int queued, long totalDropped, long totalRejected) {
+				TickPilot.LOGGER.info("Deferred task queue recovered, {} waiting ({} dropped and "
+						+ "{} refused in total)", queued, totalDropped, totalRejected);
+			}
+		};
 	}
 
 	/** @return the meter for TickPilot's own cost (SPEC INV-10, FR-12) */
@@ -241,6 +299,16 @@ public final class TickPilotServerState {
 
 		this.config = config;
 
+		// Both apply on the spot rather than at the next restart: an operator lowering the cap or
+		// switching to STRICT is asking for it to hold now (SPEC AC-15, FR-11).
+		scheduler.setDeferralEnabled(deferralAllowed(config));
+		int droppedByNewCap = scheduler.setMaxQueued(config.maxDeferredTasks());
+
+		if (droppedByNewCap > 0) {
+			TickPilot.LOGGER.warn("max_deferred_tasks was lowered to {}; {} queued task(s) were "
+					+ "dropped to fit", config.maxDeferredTasks(), droppedByNewCap);
+		}
+
 		if (thresholdsChanged) {
 			// No warm-up: a server being reloaded has been ticking for a while, and suppressing a
 			// genuine CRITICAL for ten seconds after an operator edits the thresholds would hide
@@ -293,6 +361,38 @@ public final class TickPilotServerState {
 		// The 5 s window is the smoothed input FR-5 asks for: long enough that one slow tick
 		// cannot move the level, short enough to react within seconds.
 		return budget.update(metrics.averageMspt5s(nowNanos), nowNanos / NANOS_PER_MILLI);
+	}
+
+	/**
+	 * Runs the deferred work the public API accepted, at the very end of the tick (SPEC FR-6).
+	 *
+	 * <p>Called after the tick has been measured and after TickPilot's own overhead has been
+	 * recorded, for two reasons. The work belongs to other mods, so counting it as TickPilot's
+	 * overhead would inflate the INV-10 figure with time the mod did not spend. And the tick it
+	 * would land in has already been closed, so it cannot distort the measurement that decided
+	 * this tick's load level either. What it does cost shows up on its own line in
+	 * {@code /tickpilot status}.
+	 *
+	 * @return how many tasks were run
+	 */
+	int runScheduledWork() {
+		return scheduler.runTick(schedulerBudgetNanos());
+	}
+
+	/**
+	 * How long the scheduler may spend on deferred work this tick.
+	 *
+	 * <p>{@code target_mspt} minus {@code reserve_mspt} is the budget the whole tick is supposed to
+	 * fit in; what the tick just cost is subtracted from it, and what is left is what optional work
+	 * may take. On a tick that already blew the budget the answer is zero, and only the tasks whose
+	 * deadline has passed run — the starvation guarantee of AC-6 is not something a busy server is
+	 * allowed to skip.
+	 */
+	private long schedulerBudgetNanos() {
+		TickPilotConfig snapshot = this.config;
+		double allowedMillis = snapshot.targetMspt() - snapshot.reserveMspt();
+		long allowedNanos = (long) (allowedMillis * NANOS_PER_MILLI);
+		return Math.max(0L, allowedNanos - metrics.lastDurationNanos());
 	}
 
 	/**
@@ -365,12 +465,21 @@ public final class TickPilotServerState {
 	/**
 	 * Releases everything this state owns. Called on {@code SERVER_STOPPING}.
 	 *
-	 * <p>No threads, executors or queues exist yet; what there is to release is the measurement
-	 * history, which is cleared so that nothing can be observed from a previous world (SPEC
-	 * AC-19).
+	 * <p>No threads or executors exist; what there is to release is the measurement history and
+	 * the queue of deferred tasks, both cleared so that nothing can be observed from a previous
+	 * world (SPEC AC-19). Queued work is discarded rather than run: executing other mods' tasks
+	 * against a world being torn down would be a worse answer than losing work that was, by its own
+	 * profile, allowed to be late. Critical work never enters the queue and so cannot be lost here.
 	 */
 	void shutdown() {
 		this.disabled = true;
+
+		int discarded = scheduler.discardQueued();
+
+		if (discarded > 0) {
+			TickPilot.LOGGER.info("Discarded {} deferred task(s) that were still queued when the "
+					+ "server stopped", discarded);
+		}
 		// Belt and braces: if the server stops mid-tick, nothing may stay parked into the next
 		// world (SPEC INV-7, AC-19).
 		ProfilerHook.detach();

@@ -151,8 +151,9 @@ it is, instead of implying the more impressive one.
 
 **Missing data is stated, not filled in.** With no profiling session there is no category
 breakdown — one line saying so and a recommendation to run a session, not a plausible guess. The
-deferred-task count reads `n/a` because the scheduler does not exist yet; a `0` there would read as
-a measured empty queue.
+deferred-task line says "none — no mod has submitted work" on a server where the API is unused,
+rather than printing a row of zeros: nobody submitting anything and the queue keeping up are
+different facts, and only the second one is about performance.
 
 **A short uptime narrows the claim, it does not silence it.** Under a minute of measurements the
 output says what window it actually covers. It still gives the verdict: a server dying thirty
@@ -323,6 +324,140 @@ timestamp before doing its bookkeeping, so that bookkeeping lands inside the cat
 measuring. Deep profiling inflates the categories it reports, which is a large part of why it is
 off by default and time-limited.
 
+## For other mod developers
+
+TickPilot has a small public API in `com.tickpilot.api`. It does two things: it runs work you have
+declared safe to delay a little later than you asked, and it tells you what has been measured.
+Nothing in it makes the game do less — see [What the API cannot do](#what-the-api-cannot-do).
+
+### Deferring your own work
+
+Declare what a kind of task is once, then submit occurrences of it:
+
+```java
+public final class MyModTasks {
+    public static final ResourceLocation REBUILD_CACHE =
+            ResourceLocation.fromNamespaceAndPath("mymod", "rebuild_cache");
+
+    public static void register() {
+        TickPilotApi.registerTaskProfile(REBUILD_CACHE, TaskProfile.builder()
+                .deferrable(true)          // may run in a later tick than the one that asked
+                .maxDelayTicks(40)         // but never more than two seconds later
+                .priority(TaskPriority.LOW)
+                .coalescable(true)         // ten "it is dirty" in one tick means one rebuild
+                .build());
+    }
+}
+
+// later, on the server thread:
+SubmitResult result = TickPilotApi.submit(MyModTasks.REBUILD_CACHE, () -> rebuildCache(level));
+
+if (result.rejected()) {
+    rebuildCache(level);   // the queue was full; the work is still yours
+}
+```
+
+The rules worth knowing before you use it:
+
+- **The server thread, always.** A submission from another thread is refused with
+  `SubmitResult.WRONG_THREAD` and neither runs nor queues. TickPilot will not run your work
+  off-thread, because that is where world corruption comes from.
+- **Check the result.** `submit` never throws, so the return value is how you learn what happened.
+  `result.rejected()` means the work is still yours; the four-line pattern above is the whole
+  handling most mods need.
+- **Critical work is never delayed.** `TaskProfile.criticalTask()` runs inside `submit`, is never
+  queued, and therefore can never be dropped when the queue is full.
+- **Unregistered ids run immediately.** If you forget `registerTaskProfile`, your work still runs —
+  in the tick you submitted it, with a warning in the log. TickPilot does not assume that work it
+  knows nothing about is safe to delay.
+- **A shutdown discards what is still queued.** Anything that must survive a stop must not be
+  deferrable.
+- **STRICT mode defers nothing.** With `default_mode = "STRICT"` or `enable_adaptive_mode = false`,
+  every submission runs immediately, exactly as it would without TickPilot installed.
+
+### Protecting your content from future throttling
+
+```java
+TickPilotApi.registerPolicy(
+        ResourceLocation.fromNamespaceAndPath("mymod", "policy"),
+        (typeId, load) -> typeId.getNamespace().equals("mymod") && isTimingSensitive(typeId)
+                ? ThrottleAdvice.NEVER_THROTTLE
+                : ThrottleAdvice.NO_OPINION);
+```
+
+`NEVER_THROTTLE` is a veto that cannot be overridden, including from the config. `SAFE_TO_THROTTLE`
+is only ever a permission: TickPilot still requires the type to be on the operator's allowlist.
+
+**Nothing consults a policy today.** Entity and block entity throttling is not implemented in this
+version, so a registered policy has no effect yet. `registerPolicy` writes one log line saying so,
+so that "my policy does nothing" is not mistaken for a bug in your integration. The same is true of
+`markSafeToDefer` and `markSafeForAsyncCompute`: both are recorded and neither changes any
+behaviour yet.
+
+### Reading the metrics
+
+```java
+TickPilotApi.metrics().ifPresent(m ->
+        LOGGER.info("{} TPS, {} ms/tick, load {}", m.tps(), m.avgMspt5s(), m.load()));
+```
+
+An empty `Optional` means no server is running, TickPilot has disabled itself, or nothing has been
+measured yet. The snapshot is a copy and never changes after you receive it.
+
+### Not crashing when TickPilot is absent
+
+`TickPilotApi` returning `UNAVAILABLE` covers a server that is not running. It cannot cover the mod
+not being installed at all: if the jar is missing, the class does not exist and touching it throws
+`NoClassDefFoundError`. Keep every reference inside a class you only load after checking, and TickPilot
+becomes a genuine soft dependency:
+
+```java
+// MyMod.java - loaded always. Mentions no TickPilot type.
+public class MyMod implements ModInitializer {
+    private static boolean tickPilotPresent;
+
+    @Override
+    public void onInitialize() {
+        tickPilotPresent = FabricLoader.getInstance().isModLoaded("tickpilot");
+
+        if (tickPilotPresent) {
+            TickPilotSupport.register();   // first mention of the API is behind the check
+        }
+    }
+
+    public static void rebuildCacheSoon(ServerLevel level) {
+        if (tickPilotPresent && TickPilotSupport.deferred(level)) {
+            return;
+        }
+
+        rebuildCache(level);   // no TickPilot, or it refused: do it now
+    }
+}
+
+// TickPilotSupport.java - a separate class, loaded only when the check passed.
+final class TickPilotSupport {
+    static void register() { /* registerTaskProfile, registerPolicy */ }
+
+    static boolean deferred(ServerLevel level) {
+        return TickPilotApi.submit(MyModTasks.REBUILD_CACHE, () -> rebuildCache(level)).queued();
+    }
+}
+```
+
+Two details make this work. The check happens before any TickPilot class is named, and the calls
+live in a *separate class* — the JVM loads a class the first time it is used, so a method that
+merely mentions `TickPilotApi` in a branch that never runs is still safe, but a field or a
+signature of the enclosing class would not be. Declare TickPilot as an optional dependency ("suggests")
+in your `fabric.mod.json` and nothing else is needed.
+
+### What the API cannot do
+
+- It does not schedule Minecraft's own work. Only tasks another mod registered and submitted go
+  through the queue; TickPilot never intercepts a `Runnable` of the game's. Vanilla's tasks carry
+  no profile saying whether anything is waiting on them, so there is no honest way to reorder them.
+- It does not run anything off the server thread, and no flag in it will.
+- It does not throttle entities or block entities in this version.
+
 ## Building and testing
 
 ```bash
@@ -331,9 +466,11 @@ off by default and time-limited.
 ```
 
 The unit tests do not launch Minecraft: `com.tickpilot.metrics.TickMetrics`,
-`com.tickpilot.budget.TickBudget` and everything in `com.tickpilot.config` are plain Java classes
-with no `net.minecraft` imports. The clock is supplied by the test, and the config tests run
-against a temporary directory.
+`com.tickpilot.budget.TickBudget`, `com.tickpilot.scheduler.AdaptiveScheduler` and everything in
+`com.tickpilot.config` are plain Java classes with no `net.minecraft` imports. The clock is supplied
+by the test, and the config tests run against a temporary directory. The scheduler is generic over
+its task id type for the same reason — the mod keys it by `ResourceLocation`, the tests by `String`,
+so priority order, deadlines and queue overflow are all exercised without the game.
 
 ## Licence
 
