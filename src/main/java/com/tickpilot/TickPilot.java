@@ -5,6 +5,8 @@ import java.nio.file.Path;
 import com.tickpilot.command.TickPilotCommand;
 import com.tickpilot.config.ConfigLoadResult;
 import com.tickpilot.config.ConfigLoader;
+import com.tickpilot.config.TickPilotConfig;
+import com.tickpilot.policy.TypeLists;
 
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -45,7 +47,8 @@ public class TickPilot implements ModInitializer {
 			ConfigLoadResult config = ConfigLoader.load(configFile());
 			logConfigResult(config);
 
-			ServerStateHolder.create(server, config.config());
+			TickPilotServerState state = ServerStateHolder.create(server, config.config());
+			refreshTypeLists(state, config.config());
 			LOGGER.info("TickPilot active (dedicated={})", server.isDedicatedServer());
 		} catch (Throwable t) {
 			LOGGER.error("TickPilot failed to initialise server state; continuing without it", t);
@@ -99,6 +102,28 @@ public class TickPilot implements ModInitializer {
 
 		for (String problem : result.problems()) {
 			LOGGER.warn("  {}", problem);
+		}
+	}
+
+	/**
+	 * Resolves the operator's id lists against the registries and hands them to the state
+	 * (SPEC FR-15, INV-5).
+	 *
+	 * <p>Called on server start and on {@code /tickpilot reload}, never during mod initialisation:
+	 * the registries are not populated yet at that point. Entries that match no registered type are
+	 * reported here — an allowlist with a typo in it is inert, and an operator who is not told will
+	 * believe they configured something they did not.
+	 *
+	 * @param state  the state to update
+	 * @param config the config the lists come from
+	 */
+	public static void refreshTypeLists(TickPilotServerState state, TickPilotConfig config) {
+		TypeLists lists = TypeLists.from(config);
+		state.setTypeLists(lists);
+
+		for (String unresolved : lists.unresolved()) {
+			LOGGER.warn("Config lists an id that matches no registered entity or block entity "
+					+ "type and will have no effect: {}", unresolved);
 		}
 	}
 

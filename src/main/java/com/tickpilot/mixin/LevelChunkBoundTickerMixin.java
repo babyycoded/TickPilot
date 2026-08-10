@@ -1,5 +1,6 @@
 package com.tickpilot.mixin;
 
+import com.tickpilot.policy.PolicyHook;
 import com.tickpilot.profiler.ProfilerHook;
 import com.tickpilot.profiler.TickCategory;
 
@@ -37,6 +38,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * shadowed field gives the {@code BlockEntityType} instance, which is a registry singleton, so
  * identity is a valid aggregation key and costs nothing.
  *
+ * <h2>What it does besides timing</h2>
+ * The HEAD injector also hands the block entity to {@code PolicyHook}, which works out what SPEC
+ * FR-9 <em>would</em> decide about it and counts the answer. Nothing is skipped; the verdict is
+ * tallied and discarded.
+ *
  * <h2>Compatibility risk</h2>
  * Low. Two {@code @Inject}s, no control flow touched. Lithium 1.21.1 does not mixin this class;
  * its nearest options ({@code block_entity_ticking.sleeping.*}) work by removing block entities
@@ -57,6 +63,9 @@ public class LevelChunkBoundTickerMixin {
 	@Inject(method = "tick()V", at = @At("HEAD"))
 	private void tickpilot$beginBoundTick(CallbackInfo ci) {
 		ProfilerHook.begin(TickCategory.BLOCK_ENTITIES, blockEntity.getType());
+		// One injector, not two on the same instruction: see PolicyHook.recordEntity for why the
+		// ordering between two of them would become a correctness problem later.
+		PolicyHook.recordBlockEntity(blockEntity);
 	}
 
 	@Inject(method = "tick()V", at = @At("RETURN"))
