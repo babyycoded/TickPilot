@@ -1,5 +1,6 @@
 package com.tickpilot.mixin;
 
+import com.tickpilot.policy.PolicyHook;
 import com.tickpilot.profiler.ProfilerHook;
 import com.tickpilot.profiler.TickCategory;
 
@@ -51,6 +52,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * shared target. Per SPEC MX-3 no {@code @Overwrite} and no {@code @Redirect} is used anywhere;
  * {@code @Redirect} is what would actually collide with Lithium (§13 entry #12).
  *
+ * <h2>What it does besides timing</h2>
+ * The HEAD injector also hands the entity to {@code PolicyHook}, which decides what the throttling
+ * policies of SPEC FR-8 <em>would</em> do with it and counts the answer. Nothing is skipped and no
+ * control flow is touched: the decision is tallied and discarded. Only top-level entities are put
+ * through it — a passenger is protected from thinning in any case, and its tick is driven by its
+ * vehicle's.
+ *
  * <h2>Why no safer hook exists</h2>
  * Timing the whole entity phase from {@code ServerLevel.tick} would give the category total with
  * one hook, but FR-3 needs per-type attribution, which is only available where the individual
@@ -62,6 +70,10 @@ public class ServerLevelEntityTickMixin {
 	@Inject(method = "tickNonPassenger(Lnet/minecraft/world/entity/Entity;)V", at = @At("HEAD"))
 	private void tickpilot$beginNonPassenger(Entity entity, CallbackInfo ci) {
 		ProfilerHook.begin(TickCategory.ENTITIES, entity.getType());
+		// Same injector rather than a second Mixin on the same instruction, deliberately: two
+		// injectors at one HEAD have no defined order between them, and once this call can cancel
+		// the tick, an order that opened the profiler's frame first would leave it unclosed.
+		PolicyHook.recordEntity(entity);
 	}
 
 	@Inject(method = "tickNonPassenger(Lnet/minecraft/world/entity/Entity;)V", at = @At("RETURN"))

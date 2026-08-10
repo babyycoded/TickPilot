@@ -3,8 +3,10 @@ package com.tickpilot;
 import java.util.Locale;
 
 import com.tickpilot.budget.LoadLevelTransition;
+import com.tickpilot.policy.PolicyHook;
 import com.tickpilot.profiler.TickCategory;
 import com.tickpilot.profiler.TickProfiler;
+import com.tickpilot.zones.ZoneTracker;
 
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 
@@ -61,10 +63,33 @@ final class TickPilotTickListener {
 			// ourselves costs one extra nanoTime() per half-tick and not two (SPEC INV-10).
 			long startNanos = System.nanoTime();
 			state.onTickStart(startNanos);
+			attachPolicy(server, state);
 			state.recordOverhead(System.nanoTime() - startNanos);
 		} catch (Throwable t) {
 			state.disable("tick start measurement failed: " + t);
 		}
+	}
+
+	/**
+	 * Refills the activity zones for this tick and parks everything the throttling diagnostics
+	 * need (SPEC FR-7, FR-8, FR-9).
+	 *
+	 * <p>Costs one pass over each world's player list per tick — two doubles copied per player —
+	 * and is measured as TickPilot's own overhead, which it is. Everything after this point reads
+	 * coordinates rather than players.
+	 *
+	 * <p>Nothing here changes what the game does. The verdicts are counted and discarded; the half
+	 * of SPEC FR-8/FR-9 that skips ticks is separate, comes later, and starts from these numbers.
+	 */
+	private static void attachPolicy(MinecraftServer server, TickPilotServerState state) {
+		ZoneTracker zones = state.zones();
+		zones.beginTick(server);
+		state.policyDiagnostics().onTick();
+
+		PolicyHook.attach(state.policyDiagnostics(), zones, state.typeLists(),
+				state.config().effectiveMode(), state.loadLevel(),
+				state.config().enableAdaptiveMode(),
+				state.config().minEntityUpdateIntervalTicks());
 	}
 
 	/**
@@ -122,6 +147,10 @@ final class TickPilotTickListener {
 		if (state == null || state.isDisabled()) {
 			return;
 		}
+
+		// Unparked first and unconditionally: no Mixin may see a live tally outside the tick, and
+		// nothing may stay parked across a world (SPEC INV-7).
+		PolicyHook.detach();
 
 		try {
 			// SPEC AC-1b: /tick freeze and /tick rate change what a low TPS means, so the state

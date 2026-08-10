@@ -11,8 +11,11 @@ import com.tickpilot.metrics.TickMetricsSnapshot;
 import com.tickpilot.profiler.CostTracker;
 import com.tickpilot.profiler.ProfilerHook;
 import com.tickpilot.profiler.TickCategory;
+import com.tickpilot.policy.PolicyDiagnostics;
+import com.tickpilot.policy.TypeLists;
 import com.tickpilot.profiler.TickProfiler;
 import com.tickpilot.scheduler.AdaptiveScheduler;
+import com.tickpilot.zones.ZoneTracker;
 
 import net.minecraft.resources.ResourceLocation;
 
@@ -52,6 +55,14 @@ public final class TickPilotServerState {
 	private final CostTracker costs = new CostTracker();
 	private final OverheadMeter overhead = new OverheadMeter();
 	private final AdaptiveScheduler<ResourceLocation> scheduler;
+	private final PolicyDiagnostics policyDiagnostics = new PolicyDiagnostics();
+	private final ZoneTracker zones;
+
+	/**
+	 * Resolved id lists. {@code volatile} for the same reason as the config: {@code reload}
+	 * replaces the instance while the tick loop is reading it.
+	 */
+	private volatile TypeLists typeLists = TypeLists.empty();
 
 	private volatile TickPilotConfig config;
 	private volatile TickBudget budget;
@@ -80,6 +91,38 @@ public final class TickPilotServerState {
 		this.scheduler = new AdaptiveScheduler<>(config.maxDeferredTasks(), System::nanoTime,
 				schedulerEvents());
 		this.scheduler.setDeferralEnabled(deferralAllowed(config));
+		this.zones = new ZoneTracker(config.fullRadius(), config.reducedRadius());
+	}
+
+	/** @return the per-world activity zones owned by this server (SPEC FR-7) */
+	public ZoneTracker zones() {
+		return zones;
+	}
+
+	/**
+	 * @return the tally of what the throttling policies <em>would</em> do (SPEC FR-8, FR-9). In
+	 *         this version nothing acts on it: the diagnostic half comes first so that the half
+	 *         which skips ticks has a measured baseline rather than an expectation (SPEC INV-3)
+	 */
+	public PolicyDiagnostics policyDiagnostics() {
+		return policyDiagnostics;
+	}
+
+	/** @return the operator's id lists, resolved against the registries (SPEC INV-5) */
+	public TypeLists typeLists() {
+		return typeLists;
+	}
+
+	/**
+	 * Swaps in freshly resolved id lists. Called from the Minecraft-facing side, which is the only
+	 * one that may touch a registry, on server start and on {@code /tickpilot reload}.
+	 *
+	 * @param typeLists the resolved lists; {@code null} is ignored
+	 */
+	public void setTypeLists(TypeLists typeLists) {
+		if (typeLists != null) {
+			this.typeLists = typeLists;
+		}
 	}
 
 	/** @return the queue of deferred API tasks owned by this server (SPEC FR-6) */
@@ -302,6 +345,11 @@ public final class TickPilotServerState {
 		// Both apply on the spot rather than at the next restart: an operator lowering the cap or
 		// switching to STRICT is asking for it to hold now (SPEC AC-15, FR-11).
 		scheduler.setDeferralEnabled(deferralAllowed(config));
+		zones.setRadii(config.fullRadius(), config.reducedRadius());
+		// The tally describes decisions taken under one configuration. Carrying it across a reload
+		// would average two different sets of rules into one number, which is the same mistake the
+		// profiler avoids by clearing itself between sessions.
+		policyDiagnostics.reset();
 		int droppedByNewCap = scheduler.setMaxQueued(config.maxDeferredTasks());
 
 		if (droppedByNewCap > 0) {
@@ -490,5 +538,9 @@ public final class TickPilotServerState {
 		costs.reset();
 		overhead.reset();
 		metrics.reset();
+		// The zone tracker keys its map by world, so holding it past the server would keep every
+		// world alive (SPEC INV-7, AC-19).
+		zones.clear();
+		policyDiagnostics.reset();
 	}
 }

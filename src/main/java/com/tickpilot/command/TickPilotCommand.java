@@ -19,6 +19,8 @@ import com.tickpilot.config.ConfigLoader;
 import com.tickpilot.metrics.OverheadMeter;
 import com.tickpilot.metrics.TickMetrics;
 import com.tickpilot.metrics.TickMetricsSnapshot;
+import com.tickpilot.policy.PolicyDiagnostics;
+import com.tickpilot.policy.ThrottleVerdict;
 import com.tickpilot.profiler.CostTracker;
 import com.tickpilot.profiler.TickCategory;
 import com.tickpilot.profiler.TickProfiler;
@@ -347,6 +349,65 @@ public final class TickPilotCommand {
 
 	private static double toMsptPerTick(long nanos, long ticks) {
 		return ticks <= 0L ? 0.0 : (double) nanos / ticks / 1_000_000.0;
+	}
+
+	/**
+	 * What the throttling policies of SPEC FR-8 and FR-9 would do, and what is stopping them.
+	 *
+	 * <p>Nothing is thinned in this version, and the output says so on its own line rather than
+	 * leaving an operator to infer it from a number. The useful figure is the last one: the reason
+	 * that stopped the most objects is what an operator would have to change for thinning to do
+	 * anything at all, and on a default install that reason is "nobody put anything on the
+	 * allowlist", which is exactly what SPEC INV-5 intends.
+	 */
+	private static void sendPolicyLines(CommandSourceStack source, TickPilotServerState state) {
+		PolicyDiagnostics policy = state.policyDiagnostics();
+
+		if (policy.isEmpty()) {
+			return;
+		}
+
+		source.sendSuccess(() -> Component.translatable("command.tickpilot.policy.header")
+				.withStyle(ChatFormatting.GRAY), false);
+
+		sendPolicyRow(source, policy, true);
+		sendPolicyRow(source, policy, false);
+
+		// The one number here that is not hypothetical: AI steps that were actually not run.
+		if (policy.aiConsideredPerTick() > 0.0) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.policy.ai",
+					format(policy.aiConsideredPerTick()), format(policy.aiSkippedPerTick()),
+					state.config().minEntityUpdateIntervalTicks())
+					.withStyle(policy.aiSkipped() > 0L ? ChatFormatting.GOLD : ChatFormatting.GRAY),
+					false);
+		}
+	}
+
+	private static void sendPolicyRow(CommandSourceStack source, PolicyDiagnostics policy,
+			boolean entities) {
+		long seen = entities ? policy.entitiesSeen() : policy.blockEntitiesSeen();
+
+		if (seen == 0L) {
+			return;
+		}
+
+		double eligible = entities
+				? policy.eligibleEntitiesPerTick()
+				: policy.eligibleBlockEntitiesPerTick();
+		double perTick = policy.ticks() <= 0L ? 0.0 : (double) seen / policy.ticks();
+
+		source.sendSuccess(() -> Component.translatable(
+				entities ? "command.tickpilot.policy.entities" : "command.tickpilot.policy.block_entities",
+				format(perTick), format(eligible)), false);
+
+		// The whole breakdown, not just the top reason: the commonest one is often something an
+		// operator cannot act on ("they are all protected"), while the line under it is the one
+		// that says the allowlist is empty.
+		for (PolicyDiagnostics.Blocker blocker : policy.blockersDescending(entities)) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.policy.reason",
+					format(blocker.perTick()),
+					Component.translatable(blocker.verdict().translationKey())), false);
+		}
 	}
 
 	/**
@@ -698,6 +759,9 @@ public final class TickPilotCommand {
 			TickPilot.logConfigResult(result);
 
 			boolean thresholdsChanged = state.reconfigure(result.config(), System.nanoTime());
+			// The registries are only reachable from here, not from the state, so the id lists are
+			// re-resolved on the command path (SPEC INV-5, FR-15).
+			TickPilot.refreshTypeLists(state, result.config());
 
 			switch (result.status()) {
 				case CREATED -> source.sendSuccess(() -> Component.translatable(
@@ -833,6 +897,9 @@ public final class TickPilotCommand {
 
 			// SPEC FR-12: `status` reports the deferred task queue of FR-6.
 			sendSchedulerLine(source, state);
+
+			// SPEC FR-7/FR-8/FR-9, diagnostic half: what thinning would do, and what stops it.
+			sendPolicyLines(source, state);
 
 			// SPEC AC-1b: say out loud when a low TPS is configured rather than caused by load.
 			if (state.isTickRateFrozen()) {
