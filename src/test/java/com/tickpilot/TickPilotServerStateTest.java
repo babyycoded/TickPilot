@@ -5,7 +5,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.tickpilot.TickPilotServerState.ModeChange;
 import com.tickpilot.budget.TickBudget;
+import com.tickpilot.config.AdaptiveMode;
 import com.tickpilot.config.ConfigLoader;
 import com.tickpilot.config.TickPilotConfig;
 
@@ -116,5 +118,96 @@ class TickPilotServerStateTest {
 				config("target_mspt = 80.0\ncritical_mspt = 10.0\n"));
 
 		assertTrue(state.budget().criticalMspt() > state.budget().targetMspt());
+	}
+
+	// --- /tickpilot mode (SPEC FR-12, AC-11) ---------------------------------------------------
+
+	@Test
+	void theModeStartsAtWhateverTheConfigSays() {
+		TickPilotServerState state = new TickPilotServerState(START_NANOS,
+				config("default_mode = \"aggressive\"\n"));
+
+		assertSame(AdaptiveMode.AGGRESSIVE, state.effectiveMode());
+		assertFalse(state.isModeOverridden());
+	}
+
+	@Test
+	void theCommandChangesTheModeAndSaysSo() {
+		TickPilotServerState state = new TickPilotServerState(START_NANOS, config(""));
+
+		assertSame(ModeChange.APPLIED, state.setMode(AdaptiveMode.AGGRESSIVE));
+		assertSame(AdaptiveMode.AGGRESSIVE, state.effectiveMode());
+		assertTrue(state.isModeOverridden());
+	}
+
+	/** AC-11: the change applies without a restart, and STRICT stops every intervention at once. */
+	@Test
+	void switchingToStrictStopsDeferralImmediately() {
+		TickPilotServerState state = new TickPilotServerState(START_NANOS, config(""));
+
+		assertTrue(state.scheduler().isDeferralEnabled());
+
+		state.setMode(AdaptiveMode.STRICT);
+
+		assertFalse(state.scheduler().isDeferralEnabled());
+
+		state.setMode(AdaptiveMode.BALANCED);
+
+		assertTrue(state.scheduler().isDeferralEnabled());
+	}
+
+	@Test
+	void settingTheModeItIsAlreadyInChangesNothing() {
+		TickPilotServerState state = new TickPilotServerState(START_NANOS,
+				config("default_mode = \"balanced\"\n"));
+
+		assertSame(ModeChange.UNCHANGED, state.setMode(AdaptiveMode.BALANCED));
+		assertFalse(state.isModeOverridden());
+	}
+
+	/** Going back to what the file asks for leaves a clean state, not one that merely agrees. */
+	@Test
+	void settingTheModeBackToTheConfiguredOneClearsTheOverride() {
+		TickPilotServerState state = new TickPilotServerState(START_NANOS,
+				config("default_mode = \"balanced\"\n"));
+
+		state.setMode(AdaptiveMode.AGGRESSIVE);
+		assertTrue(state.isModeOverridden());
+
+		assertSame(ModeChange.APPLIED, state.setMode(AdaptiveMode.BALANCED));
+		assertFalse(state.isModeOverridden(), "back to the config value is not an override");
+		assertSame(AdaptiveMode.BALANCED, state.effectiveMode());
+	}
+
+	/**
+	 * {@code safe_compatibility_mode} is the operator saying "this server runs no experiments". A
+	 * chat command that could defeat it would make the config file a lie.
+	 */
+	@Test
+	void safeCompatibilityModeCannotBeOverriddenByCommand() {
+		TickPilotServerState state = new TickPilotServerState(START_NANOS,
+				config("safe_compatibility_mode = true\ndefault_mode = \"aggressive\"\n"));
+
+		assertSame(AdaptiveMode.STRICT, state.effectiveMode());
+
+		for (AdaptiveMode mode : AdaptiveMode.values()) {
+			assertSame(ModeChange.FORCED_STRICT, state.setMode(mode), "refused for " + mode);
+			assertSame(AdaptiveMode.STRICT, state.effectiveMode());
+			assertFalse(state.isModeOverridden());
+		}
+	}
+
+	@Test
+	void reloadingTheConfigPutsTheFileBackInCharge() {
+		TickPilotServerState state = new TickPilotServerState(START_NANOS,
+				config("default_mode = \"balanced\"\n"));
+
+		state.setMode(AdaptiveMode.STRICT);
+		assertSame(AdaptiveMode.STRICT, state.effectiveMode());
+
+		state.reconfigure(config("default_mode = \"aggressive\"\n"), START_NANOS);
+
+		assertFalse(state.isModeOverridden(), "reload must drop a mode set by command");
+		assertSame(AdaptiveMode.AGGRESSIVE, state.effectiveMode());
 	}
 }
