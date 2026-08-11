@@ -3,7 +3,11 @@ package com.tickpilot;
 import java.util.Locale;
 
 import com.tickpilot.budget.LoadLevelTransition;
+import com.tickpilot.chunk.ChunkBudget;
+import com.tickpilot.chunk.ChunkBudgetHook;
+import com.tickpilot.chunk.ChunkBudgetTracker;
 import com.tickpilot.policy.PolicyHook;
+import com.tickpilot.policy.TickPolicy;
 import com.tickpilot.profiler.TickCategory;
 import com.tickpilot.profiler.TickProfiler;
 import com.tickpilot.zones.ZoneTracker;
@@ -64,6 +68,7 @@ final class TickPilotTickListener {
 			long startNanos = System.nanoTime();
 			state.onTickStart(startNanos);
 			attachPolicy(server, state);
+			openChunkBudgetTick(server, state);
 			state.recordOverhead(System.nanoTime() - startNanos);
 		} catch (Throwable t) {
 			state.disable("tick start measurement failed: " + t);
@@ -90,6 +95,41 @@ final class TickPilotTickListener {
 				state.config().effectiveMode(), state.loadLevel(),
 				state.config().enableAdaptiveMode(),
 				state.config().minEntityUpdateIntervalTicks());
+	}
+
+	/**
+	 * Refills the chunk classifier and opens this tick's allowance (SPEC FR-10, AC-10).
+	 *
+	 * <p>Note where the park is <em>not</em>: {@code ChunkBudgetHook} is attached for as long as the
+	 * server runs, from {@code TickPilot.onServerStarted}, and not here. Chunk generation is drained
+	 * mostly outside the span the Fabric tick events cover, so a per-tick park never sees it — that
+	 * was measured on a live server, not assumed. What belongs here is the allowance, which is
+	 * per tick by definition.
+	 *
+	 * <p>Skipped entirely when the feature is off, which is the default (SPEC INV-3): with the flag
+	 * unset this costs one boolean read per tick, nothing is classified, and the Mixins find a
+	 * disabled budget and return immediately (SPEC INV-10).
+	 *
+	 * <p>Note what the two flags separate. Once an operator switches the feature on, classification
+	 * and the counters run at every load level so that {@code status} can say where chunk generation
+	 * demand comes from; only the second flag, which follows the FR-11 mode table exactly as the
+	 * entity policies do, decides whether anything is actually held back.
+	 */
+	private static void openChunkBudgetTick(MinecraftServer server, TickPilotServerState state) {
+		ChunkBudget budget = state.chunkBudget();
+
+		if (!state.chunkBudgetEnabled()) {
+			budget.configure(false, false, state.config().maxChunkOperationsPerTick());
+			return;
+		}
+
+		ChunkBudgetTracker tracker = state.chunkTracker();
+		tracker.beginTick(server);
+
+		budget.configure(true,
+				TickPolicy.intervenesAt(state.config().effectiveMode(), state.loadLevel()),
+				state.config().maxChunkOperationsPerTick());
+		budget.beginTick(tracker.tick());
 	}
 
 	/**
@@ -141,6 +181,47 @@ final class TickPilotTickListener {
 		return ticks <= 0L ? 0.0 : (double) nanos / ticks / 1_000_000.0;
 	}
 
+	/**
+	 * Closes the chunk budget's tick and logs an emergency release if one happened (SPEC FR-10,
+	 * AC-16).
+	 *
+	 * <p>One line per release, never per tick: the budget reports the event exactly once and then
+	 * runs uncapped for thirty seconds, which is the same cooldown AC-16 asks for. Its own
+	 * try/catch, because this runs before the measurement block and a failure here must not be
+	 * reported as a measurement failure (SPEC INV-9).
+	 */
+	private static void closeChunkBudgetTick(TickPilotServerState state) {
+		try {
+			ChunkBudget budget = state.chunkBudget();
+
+			if (!budget.isEnabled()) {
+				return;
+			}
+
+			budget.endTick();
+
+			if (!budget.consumeLiftEvent()) {
+				return;
+			}
+
+			if (budget.liftReason() == ChunkBudget.LiftReason.SUSPECTED_BLOCK) {
+				TickPilot.LOGGER.warn("Chunk budget lifted: nothing was dispatched for {} ms while "
+						+ "chunk work waited, which is what a server thread blocked on a held chunk "
+						+ "looks like. The cap is off for the next {} ticks. If this repeats, raise "
+						+ "max_chunk_operations_per_tick or set enable_chunk_budget = false",
+						ChunkBudget.STALL_SUSPECT_MILLIS, ChunkBudget.LIFT_DURATION_TICKS);
+			} else {
+				TickPilot.LOGGER.warn("Chunk budget lifted: the cap of {} held chunk work back on {} "
+						+ "consecutive ticks, so it is the cap and not the load that is shaping this "
+						+ "server. Off for the next {} ticks. Raise max_chunk_operations_per_tick if "
+						+ "this repeats", state.config().maxChunkOperationsPerTick(),
+						ChunkBudget.SATURATED_TICKS_BEFORE_LIFT, ChunkBudget.LIFT_DURATION_TICKS);
+			}
+		} catch (Throwable t) {
+			state.disable("chunk budget failed: " + t);
+		}
+	}
+
 	private static void onEndTick(MinecraftServer server) {
 		TickPilotServerState state = ServerStateHolder.get(server);
 
@@ -151,6 +232,7 @@ final class TickPilotTickListener {
 		// Unparked first and unconditionally: no Mixin may see a live tally outside the tick, and
 		// nothing may stay parked across a world (SPEC INV-7).
 		PolicyHook.detach();
+		closeChunkBudgetTick(state);
 
 		try {
 			// SPEC AC-1b: /tick freeze and /tick rate change what a low TPS means, so the state

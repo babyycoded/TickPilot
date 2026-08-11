@@ -69,6 +69,16 @@ final class TomlWriter {
 		bool(out, "enable_adaptive_mode", config.enableAdaptiveMode());
 		string(out, "default_mode", config.defaultMode().configValue());
 		integer(out, "max_deferred_tasks", config.maxDeferredTasks());
+		out.append(NL);
+
+		section(out, "Chunk budget");
+		comment(out, "Caps how much optional chunk generation may start per tick. Off by default.");
+		comment(out, "Chunks a player is waiting for, teleport and portal destinations, and");
+		comment(out, "force-loaded regions are never capped, whatever this is set to. In practice");
+		comment(out, "that leaves only background loading done by other mods, such as a chunk");
+		comment(out, "pregenerator, so on a server without one this setting changes nothing.");
+		comment(out, "The cap lifts itself if it ever looks like something is waiting on it.");
+		bool(out, "enable_chunk_budget", config.enableChunkBudget());
 		integer(out, "max_chunk_operations_per_tick", config.maxChunkOperationsPerTick());
 		out.append(NL);
 

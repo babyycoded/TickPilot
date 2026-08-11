@@ -3,6 +3,8 @@ package com.tickpilot;
 import com.tickpilot.budget.LoadLevel;
 import com.tickpilot.budget.LoadLevelTransition;
 import com.tickpilot.budget.TickBudget;
+import com.tickpilot.chunk.ChunkBudget;
+import com.tickpilot.chunk.ChunkBudgetTracker;
 import com.tickpilot.config.AdaptiveMode;
 import com.tickpilot.config.TickPilotConfig;
 import com.tickpilot.metrics.OverheadMeter;
@@ -57,6 +59,8 @@ public final class TickPilotServerState {
 	private final AdaptiveScheduler<ResourceLocation> scheduler;
 	private final PolicyDiagnostics policyDiagnostics = new PolicyDiagnostics();
 	private final ZoneTracker zones;
+	private final ChunkBudget chunkBudget = new ChunkBudget();
+	private final ChunkBudgetTracker chunkTracker = new ChunkBudgetTracker();
 
 	/**
 	 * Resolved id lists. {@code volatile} for the same reason as the config: {@code reload}
@@ -97,6 +101,30 @@ public final class TickPilotServerState {
 	/** @return the per-world activity zones owned by this server (SPEC FR-7) */
 	public ZoneTracker zones() {
 		return zones;
+	}
+
+	/** @return the cap on optional chunk operations owned by this server (SPEC FR-10) */
+	public ChunkBudget chunkBudget() {
+		return chunkBudget;
+	}
+
+	/** @return the per-world chunk classifier owned by this server (SPEC AC-10) */
+	public ChunkBudgetTracker chunkTracker() {
+		return chunkTracker;
+	}
+
+	/**
+	 * Whether the chunk budget may classify and count at all, before the load level is considered.
+	 *
+	 * <p>STRICT is the compatibility mode and performs no intervention whatsoever (SPEC FR-11), and
+	 * with adaptive behaviour off nothing TickPilot does may change what the game does. The
+	 * dedicated flag on top of both is SPEC INV-3: this feature reorders chunk loading, which is the
+	 * most consequential thing the mod touches, so it stays off until an operator asks for it.
+	 */
+	public boolean chunkBudgetEnabled() {
+		TickPilotConfig snapshot = this.config;
+		return snapshot.enableChunkBudget() && snapshot.enableAdaptiveMode()
+				&& snapshot.effectiveMode() != AdaptiveMode.STRICT;
 	}
 
 	/**
@@ -350,6 +378,9 @@ public final class TickPilotServerState {
 		// would average two different sets of rules into one number, which is the same mistake the
 		// profiler avoids by clearing itself between sessions.
 		policyDiagnostics.reset();
+		// Same argument for the chunk counters: they describe decisions taken under one cap, and an
+		// operator who has just changed the cap is asking what the new one does.
+		chunkBudget.reset();
 		int droppedByNewCap = scheduler.setMaxQueued(config.maxDeferredTasks());
 
 		if (droppedByNewCap > 0) {
@@ -539,8 +570,10 @@ public final class TickPilotServerState {
 		overhead.reset();
 		metrics.reset();
 		// The zone tracker keys its map by world, so holding it past the server would keep every
-		// world alive (SPEC INV-7, AC-19).
+		// world alive (SPEC INV-7, AC-19). The chunk classifier keys its map the same way.
 		zones.clear();
+		chunkTracker.clear();
+		chunkBudget.reset();
 		policyDiagnostics.reset();
 	}
 }

@@ -19,6 +19,8 @@ import com.tickpilot.config.ConfigLoader;
 import com.tickpilot.metrics.OverheadMeter;
 import com.tickpilot.metrics.TickMetrics;
 import com.tickpilot.metrics.TickMetricsSnapshot;
+import com.tickpilot.chunk.ChunkBudgetStats;
+import com.tickpilot.chunk.ChunkOpClass;
 import com.tickpilot.policy.PolicyDiagnostics;
 import com.tickpilot.policy.ThrottleVerdict;
 import com.tickpilot.profiler.CostTracker;
@@ -407,6 +409,71 @@ public final class TickPilotCommand {
 			source.sendSuccess(() -> Component.translatable("command.tickpilot.policy.reason",
 					format(blocker.perTick()),
 					Component.translatable(blocker.verdict().translationKey())), false);
+		}
+	}
+
+	/**
+	 * What the chunk budget of SPEC FR-10 has classified and what, if anything, it held back.
+	 *
+	 * <p>The line that matters most is the one that normally is not printed: if anything a player
+	 * was waiting for was ever held back, SPEC INV-8 has been violated and the output says so in
+	 * those words rather than leaving an operator to work it out from a table. That counter is also
+	 * what the manual teleport scenario in the README reads.
+	 */
+	private static void sendChunkBudgetLines(CommandSourceStack source, TickPilotServerState state) {
+		ChunkBudgetStats chunks = state.chunkBudget().stats();
+
+		if (!chunks.enabled()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.chunk.off")
+					.withStyle(ChatFormatting.GRAY), false);
+			return;
+		}
+
+		if (chunks.isUnused()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.chunk.idle",
+					chunks.maxOptionalPerTick()).withStyle(ChatFormatting.GRAY), false);
+			return;
+		}
+
+		source.sendSuccess(() -> Component.translatable("command.tickpilot.chunk",
+				chunks.maxOptionalPerTick(), chunks.dispatched(), chunks.held(),
+				chunks.limitedTicks(), chunks.ticks()), false);
+
+		// Per class, because "where does chunk generation demand come from" is the question this
+		// table answers even on a server where nothing is ever held back.
+		for (ChunkOpClass opClass : ChunkOpClass.all()) {
+			long dispatched = chunks.dispatched(opClass);
+			long held = chunks.held(opClass);
+
+			if (dispatched == 0L && held == 0L) {
+				continue;
+			}
+
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.chunk.row",
+					Component.translatable(opClass.translationKey()), dispatched, held)
+					.withStyle(held > 0L ? ChatFormatting.GOLD : ChatFormatting.GRAY), false);
+		}
+
+		if (chunks.liftReason() != null) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.chunk.lifted",
+					Component.translatable(chunks.liftReason().translationKey()),
+					chunks.liftRemainingTicks()).withStyle(ChatFormatting.YELLOW), false);
+		} else if (!chunks.limiting()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.chunk.watching")
+					.withStyle(ChatFormatting.GRAY), false);
+		}
+
+		if (chunks.lifts() > 0L) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.chunk.lifts",
+					chunks.lifts(), chunks.liftsSuspectedBlock(), chunks.liftsSaturation())
+					.withStyle(ChatFormatting.YELLOW), false);
+		}
+
+		// Must never happen. If it ever does, an operator has to be told in words, not left to
+		// notice a number in a row above (SPEC INV-8).
+		if (chunks.heldPlayerCritical()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.chunk.protected_held")
+					.withStyle(ChatFormatting.RED), false);
 		}
 	}
 
@@ -900,6 +967,9 @@ public final class TickPilotCommand {
 
 			// SPEC FR-7/FR-8/FR-9, diagnostic half: what thinning would do, and what stops it.
 			sendPolicyLines(source, state);
+
+			// SPEC FR-10: the cap on optional chunk work, and the INV-8 guarantee as a number.
+			sendChunkBudgetLines(source, state);
 
 			// SPEC AC-1b: say out loud when a low TPS is configured rather than caused by load.
 			if (state.isTickRateFrozen()) {

@@ -144,6 +144,7 @@ public final class ConfigLoader {
 				v.bool("enable_adaptive_mode", TickPilotConfig.DEFAULT_ENABLE_ADAPTIVE_MODE),
 				v.mode("default_mode", TickPilotConfig.DEFAULT_MODE),
 				v.intAtLeast("max_deferred_tasks", 1, TickPilotConfig.DEFAULT_MAX_DEFERRED_TASKS),
+				v.bool("enable_chunk_budget", TickPilotConfig.DEFAULT_ENABLE_CHUNK_BUDGET),
 				v.intAtLeast("max_chunk_operations_per_tick", 1,
 						TickPilotConfig.DEFAULT_MAX_CHUNK_OPERATIONS_PER_TICK),
 				v.intAtLeast("profile_buffer_size", 1, TickPilotConfig.DEFAULT_PROFILE_BUFFER_SIZE),

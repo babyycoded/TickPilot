@@ -2,6 +2,7 @@ package com.tickpilot;
 
 import java.nio.file.Path;
 
+import com.tickpilot.chunk.ChunkBudgetHook;
 import com.tickpilot.command.TickPilotCommand;
 import com.tickpilot.config.ConfigLoadResult;
 import com.tickpilot.config.ConfigLoader;
@@ -49,6 +50,16 @@ public class TickPilot implements ModInitializer {
 
 			TickPilotServerState state = ServerStateHolder.create(server, config.config());
 			refreshTypeLists(state, config.config());
+
+			// Parked for as long as the server runs, and not per tick like the profiler and the
+			// policy hooks. Measured on a live 1.21.1 server: chunk generation is drained mostly by
+			// MinecraftServer polling tasks in its spare time, which is *outside* the span the Fabric
+			// tick events cover (the same gap SPEC §13 entry #8 documents for measurement). A
+			// per-tick park saw an empty pending list every time and classified nothing at all.
+			// The per-tick allowance is still opened and closed by the tick listener; only the park
+			// is wider. Nothing survives the server: SERVER_STOPPING detaches (SPEC INV-7, AC-19).
+			ChunkBudgetHook.attach(state.chunkBudget(), state.chunkTracker());
+
 			LOGGER.info("TickPilot active (dedicated={})", server.isDedicatedServer());
 		} catch (Throwable t) {
 			LOGGER.error("TickPilot failed to initialise server state; continuing without it", t);
@@ -57,6 +68,9 @@ public class TickPilot implements ModInitializer {
 
 	private static void onServerStopping(MinecraftServer server) {
 		try {
+			// First, and unconditionally: a chunk drain during shutdown must not be able to hold
+			// anything back, and nothing may stay parked into the next world (SPEC INV-7, AC-19).
+			ChunkBudgetHook.detach();
 			ServerStateHolder.shutdown(server);
 		} catch (Throwable t) {
 			LOGGER.error("TickPilot failed to shut down cleanly", t);

@@ -5,6 +5,76 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
 
 ## Unreleased
 
+### Phase 9 — chunk budget (FR-10, AC-10, INV-8)
+
+A cap on how much **optional** chunk generation may start per tick, off by default behind the new
+`enable_chunk_budget` flag. The whole feature is built around one requirement it is not allowed to
+break: a player must never sit on the terrain-loading screen because of TickPilot.
+
+- `com.tickpilot.chunk.ChunkOpClass` is the SPEC AC-10 priority list, expressed as declaration
+  order. Only the last two classes are optional; the first three are INV-8 written down, and there
+  is no configuration or load level at which they can be refused — `ChunkBudgetTest` walks the
+  whole input space to check that rather than sampling it.
+- Classification uses the vanilla ticket types, which turn out to be exactly the protected classes:
+  `START`, `DRAGON`, `PLAYER`, `FORCED`, `PORTAL`, `POST_TELEPORT`, `UNKNOWN`. `UNKNOWN` is treated
+  as the **highest** priority, not the lowest its name suggests — it is the ticket
+  `ServerChunkCache.getChunk` takes out while the server thread is blocked waiting for that chunk.
+- The player radius is view distance **plus nine chunks**, not view distance. Full generation pulls
+  in a neighbourhood of up to eight chunks around whatever it is generating, so a tighter radius
+  would hold back the neighbours of the chunk a player is waiting for — INV-8 broken by arithmetic
+  rather than by intent. Distance is Chebyshev, because Minecraft loads a square, not a disc.
+- Nothing is dropped, cancelled or queued by TickPilot. Held tasks are moved out of vanilla's own
+  `pendingGenerationTasks` list at the head of `runGenerationTasks` and put back at its return, at
+  the front. The Phase 7 failure of a shared deadline flushing a whole batch into one tick cannot
+  recur here because there is no deadline and no second queue.
+- **Two emergency releases**, both logged once. Nothing dispatched for a second while chunk work
+  waits — the signature of a blocked server thread — drops the cap for 30 s. So does the cap having
+  been the binding constraint for 5 s, which is the window the load level itself is computed over.
+- `/tickpilot status` reports the per-class breakdown, and says in words, in red, if anything
+  player-critical was ever held. That counter is the pass condition of the manual teleport scenario
+  now documented in `README.md`.
+- Two Mixins, both `@Inject`: `ChunkMap.runGenerationTasks` (HEAD and RETURN) and
+  `ServerChunkCache.addRegionTicket` (HEAD, read-only). The ticket layer was considered as the
+  obvious place and rejected — see `SPEC.md` §13 entry #19.
+- 21 new unit tests; suite total 305.
+- `build.gradle` now runs the client out of `run/runclient`. Sharing `run/` with the server makes
+  the two processes fight over `run/.fabric/processedMods`, and the second to start dies during mod
+  remapping — which is exactly the pair the manual scenario needs running at once.
+
+#### What was verified live, and what was not
+
+**Verified on a live dedicated server** with a real client attached
+(`runClient --args="--quickPlayMultiplayer localhost:25565"`, Lithium 0.15.4 on both sides),
+configured for the worst case: `max_chunk_operations_per_tick = 1` and thresholds lowered to
+`0.1 / 0.2` so the load level sat at CRITICAL and the cap really applied.
+
+- Both Mixins applied (`defaultRequire: 1`, so a failed injection would have stopped the server).
+- Four long-distance teleports — `10000 200 10000`, `-10000 200 -10000`, a cross-dimension jump
+  into the Nether, and a return to the Overworld — plus a `/locate structure mansion`. Across all
+  of them: **0 held in every class**, 0 of 7530 ticks capped, TPS 20.00, no emergency release, and
+  no disconnect. The client was still in the world and receiving chat five minutes and four
+  teleports later.
+- The `POST_TELEPORT` protection is not theoretical: the first teleport classified 511 chunk
+  generation starts, 31 of them via the teleport ticket. Those are chunks that would otherwise have
+  been "far from every player" — the player's position had not moved yet when they were scheduled.
+- The classifier reaches its background branch: one chunk operation in an emptied Nether was
+  classified `world with no players in it`.
+
+**Not verified live, and why.** The path where the cap actually *holds* work back was never
+exercised on the running server, because a vanilla server cannot produce work of that class: every
+vanilla ticket type lands in a protected class by construction. That is the same fact the README
+warns about — on a server with no other chunk-loading mods this feature has nothing to cap. The
+holding path, the priority ordering and both releases are covered by unit tests
+(`ChunkBudgetTest`, `ChunkDrainPlanTest`); reading a `ChunkPos` off a live `ChunkGenerationTask` is
+the one part covered by neither, which is why the manual scenario exists.
+
+**Found by running it, not by reading it.** The first implementation parked its hook per tick, like
+the profiler and policy hooks, and classified **nothing at all** during a 10 000-block teleport:
+chunk generation is drained mostly from `MinecraftServer.pollTaskInternal`, outside the span the
+Fabric tick events cover. The park now lasts as long as the server. The same measurement invalidated
+the first emergency release, which counted consecutive empty drains — between two ticks an idle
+server produces hundreds of those. It now measures elapsed time instead. `SPEC.md` §13 entry #20.
+
 ### Phase 8a — activity zones and throttling diagnostics (FR-7, FR-11, AC-7, AC-11)
 
 The first half of the riskiest phase, and it deliberately changes nothing about what the game does.
