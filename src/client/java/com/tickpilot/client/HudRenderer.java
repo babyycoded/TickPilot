@@ -59,6 +59,20 @@ final class HudRenderer {
 		HudRenderCallback.EVENT.register(HudRenderer::onHudRender);
 	}
 
+	/**
+	 * Gives the HUD another chance in the next world (SPEC INV-7).
+	 *
+	 * <p>Found by the Phase 11 audit of static fields: {@link #failed} said "off for this session",
+	 * which made it the one piece of client state that outlived the world that produced it. A
+	 * transient failure in world A would leave world B without a HUD until the game was restarted,
+	 * and the operator would have no way to tell that from the feature being off. Cleared per world
+	 * instead — a failure that repeats logs once per world, which is still nowhere near the
+	 * per-frame spam AC-16 is about.
+	 */
+	static void reset() {
+		failed = false;
+	}
+
 	private static void onHudRender(GuiGraphics graphics, DeltaTracker deltaTracker) {
 		if (failed) {
 			return;
