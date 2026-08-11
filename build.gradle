@@ -17,6 +17,16 @@ repositories {
 loom {
 	splitEnvironmentSourceSets()
 
+	runs {
+		client {
+			// A separate directory so runClient and runServer can be up at the same time, which is
+			// what the manual chunk budget scenario in README.md needs. Sharing run/ makes the two
+			// processes fight over run/logs/latest.log and run/.fabric/processedMods, and the second
+			// one to start dies during mod remapping.
+			runDir = "run/runclient"
+		}
+	}
+
 	mods {
 		"tickpilot" {
 			sourceSet sourceSets.main

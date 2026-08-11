@@ -117,6 +117,8 @@ class ConfigLoaderTest {
 				enable_adaptive_mode = false
 				default_mode = "strict"
 				max_deferred_tasks = 500
+
+				enable_chunk_budget = true
 				max_chunk_operations_per_tick = 1
 
 				profile_buffer_size = 600
@@ -150,6 +152,7 @@ class ConfigLoaderTest {
 		assertFalse(c.enableAdaptiveMode());
 		assertEquals(AdaptiveMode.STRICT, c.defaultMode());
 		assertEquals(500, c.maxDeferredTasks());
+		assertTrue(c.enableChunkBudget());
 		assertEquals(1, c.maxChunkOperationsPerTick());
 		assertEquals(600, c.profileBufferSize());
 		assertEquals(5.0, c.logSlowOperationsAboveMs());
@@ -360,6 +363,22 @@ class ConfigLoaderTest {
 		assertTrue(result.problems().get(0).contains("targt_mspt"), result.problems().toString());
 	}
 
+	/**
+	 * SPEC INV-3: the chunk budget reorders chunk loading, so a config that does not mention it must
+	 * leave it off. This is the one default whose value is a safety property rather than a taste.
+	 */
+	@Test
+	void theChunkBudgetIsOffUnlessTheFileAsksForIt() {
+		assertFalse(TickPilotConfig.defaults().enableChunkBudget());
+		assertFalse(read("target_mspt = 35.0").config().enableChunkBudget());
+		assertFalse(read("enable_chunk_budget = false").config().enableChunkBudget());
+
+		ConfigLoadResult broken = read("enable_chunk_budget = \"yes\"");
+
+		assertFalse(broken.config().enableChunkBudget(), "a rejected value must fall back to off");
+		assertTrue(problemAbout(broken, "enable_chunk_budget").contains("true or false"));
+	}
+
 	// --- round trip -------------------------------------------------------------------------
 
 	@Test
@@ -374,7 +393,7 @@ class ConfigLoaderTest {
 	void nonDefaultValuesSurviveAWriteAndRead() {
 		TickPilotConfig original = new TickPilotConfig(
 				12.5, 33.25, 0.0, 8, 9, 3, 7,
-				false, AdaptiveMode.AGGRESSIVE, 1, 2, 3, 0.125,
+				false, AdaptiveMode.AGGRESSIVE, 1, true, 2, 3, 0.125,
 				true, false, true, false, true,
 				List.of("minecraft:villager"),
 				List.of("minecraft:hopper"),

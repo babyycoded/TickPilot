@@ -30,6 +30,7 @@ import java.util.List;
  * @param enableAdaptiveMode               whether adaptive behaviour is enabled at all
  * @param defaultMode                      intervention mode the server starts in
  * @param maxDeferredTasks                 hard cap on the scheduler queue
+ * @param enableChunkBudget                whether the chunk operation cap applies at all
  * @param maxChunkOperationsPerTick        cap on optional chunk operations per tick
  * @param profileBufferSize                number of samples the profiler retains
  * @param logSlowOperationsAboveMs         threshold above which a slow operation is logged
@@ -55,6 +56,7 @@ public record TickPilotConfig(
 		boolean enableAdaptiveMode,
 		AdaptiveMode defaultMode,
 		int maxDeferredTasks,
+		boolean enableChunkBudget,
 		int maxChunkOperationsPerTick,
 		int profileBufferSize,
 		double logSlowOperationsAboveMs,
@@ -89,6 +91,12 @@ public record TickPilotConfig(
 	public static final AdaptiveMode DEFAULT_MODE = AdaptiveMode.BALANCED;
 	/** @see #DEFAULT_TARGET_MSPT */
 	public static final int DEFAULT_MAX_DEFERRED_TASKS = 10_000;
+	/**
+	 * Off, because SPEC INV-3 requires every contentious optimization to be off by default and to
+	 * have a flag of its own. FR-15 ships {@code max_chunk_operations_per_tick} without such a flag,
+	 * so this key is an addition to the schema — SPEC §13 entry #19.
+	 */
+	public static final boolean DEFAULT_ENABLE_CHUNK_BUDGET = false;
 	/** @see #DEFAULT_TARGET_MSPT */
 	public static final int DEFAULT_MAX_CHUNK_OPERATIONS_PER_TICK = 8;
 	/** @see #DEFAULT_TARGET_MSPT */
@@ -117,6 +125,7 @@ public record TickPilotConfig(
 			DEFAULT_ENABLE_ADAPTIVE_MODE,
 			DEFAULT_MODE,
 			DEFAULT_MAX_DEFERRED_TASKS,
+			DEFAULT_ENABLE_CHUNK_BUDGET,
 			DEFAULT_MAX_CHUNK_OPERATIONS_PER_TICK,
 			DEFAULT_PROFILE_BUFFER_SIZE,
 			DEFAULT_LOG_SLOW_OPERATIONS_ABOVE_MS,

@@ -11,7 +11,9 @@
 		"ServerLevelChunkTickMixin",
 		"LevelChunkBoundTickerMixin",
 		"ServerLevelEntityTickMixin",
-		"MobServerAiStepMixin"
+		"MobServerAiStepMixin",
+		"ServerChunkCacheTicketMixin",
+		"ChunkMapGenerationMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

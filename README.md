@@ -3,8 +3,12 @@
 A server-side Fabric performance mod for Minecraft Java Edition 1.21.1 (Java 21).
 
 **Measure first, explain second, throttle cautiously last.** TickPilot makes no promises about
-magically raising your TPS. At this point in development it only measures and reports; nothing
-in the game is throttled or changed.
+magically raising your TPS.
+
+On a default install it still only measures and reports: nothing in the game is throttled or
+changed. Two things can change behaviour, and both are off until you switch them on and say what
+they may touch — mob AI thinning, which needs types on `throttle_allowlist` and an interval above
+1, and the [chunk budget](#chunk-budget), which needs `enable_chunk_budget = true`.
 
 > This README is a work in progress and grows with each development phase. The full document
 > required by `SPEC.md` §10 lands in Phase 11.
@@ -274,6 +278,108 @@ a later phase — so today it is validated and stored, and that is all.
 Changing `target_mspt` or `critical_mspt` and running `/tickpilot reload` rebuilds the thresholds
 and resets the level to NORMAL; it settles on the true level within about five seconds. A reload
 that leaves both thresholds alone does not disturb the level.
+
+## Chunk budget
+
+Off by default. `enable_chunk_budget = true` caps how much **optional** chunk generation may start
+per tick, at `max_chunk_operations_per_tick`.
+
+Every chunk the server starts loading or generating is put into one of five classes, and only the
+last two can ever be capped:
+
+| # | Class | Capped? | What it is |
+|---|---|---|---|
+| 1 | needed by a player now | never | within view distance of a player, or covered by a vanilla `PLAYER`, `DRAGON` or `UNKNOWN` chunk ticket |
+| 2 | teleport, portal or world start | never | covered by a `POST_TELEPORT`, `PORTAL` or `START` ticket |
+| 3 | force-loaded region | never | inside `/forceload` |
+| 4 | far from every player | yes | a world with players in it, but none near this chunk |
+| 5 | world with no players in it | yes, first | background loading |
+
+Nothing is ever dropped or cancelled. A chunk that is not allowed to start this tick starts on a
+later one, at the front of the queue — the mod keeps no queue of its own, it just leaves work in
+the list Minecraft already has.
+
+### Read this before turning it on: on a vanilla server it does nothing
+
+The vanilla chunk ticket types are, in full, `START`, `DRAGON`, `PLAYER`, `FORCED`, `PORTAL`,
+`POST_TELEPORT` and `UNKNOWN` — and every one of them lands in class 1, 2 or 3. That is not a
+coincidence, it is the point: vanilla only loads chunks somebody needs. So on a server with no
+other chunk-loading mods, the cap has nothing to cap, and `/tickpilot status` will keep saying so.
+
+What it is for is the case where something *else* is loading chunks: a pregenerator such as Chunky,
+a world scanner, a mod that keeps distant machinery loaded with a ticket of its own. Those use
+their own ticket types, which is what puts them in class 4 or 5. If you are not running one,
+leave this off.
+
+### The two ways the cap lets go
+
+Both are logged once, and both exist because a mod that delays chunk loading is one bug away from
+a player stuck on the terrain-loading screen forever:
+
+- **Nothing dispatched for a second.** `ServerChunkCache.getChunk` blocks the server thread until
+  the chunk it wants is ready. If a whole second passes with chunk work waiting and nothing at all
+  being let through, the cap is dropped for 30 seconds. A server that is still ticking dispatches
+  something every tick, so this cannot fire because the server is merely busy.
+- **The cap has been the binding constraint for five seconds.** Five seconds is the window the load
+  level itself is computed over. If the cap has held work back on every tick for that long, then
+  what is shaping the server is the cap and not the load, so it stands down for 30 seconds.
+
+### What `status` shows
+
+```
+Chunk budget: cap 1 per tick, 1128 chunk generation start(s) let through, 0 held for a later tick (0 of 5309 ticks were capped)
+    needed by a player now - 1032 let through, 0 held
+    teleport, portal or world start - 96 let through, 0 held
+```
+
+That is real output, from one player and four long-distance teleports on a server deliberately set
+to the harshest cap there is. Every start was player-critical and nothing was held — which is what
+the section above means by "on a vanilla server it does nothing".
+
+The number to look at is the second one on each row. `0 held` on the first three rows is the
+guarantee this feature has to keep, and if it is ever not zero `status` says so in words, in red.
+
+With the feature off, which is the default, the line reads:
+
+```
+Chunk budget: off (enable_chunk_budget = false) - chunk loading runs exactly as it would without TickPilot
+```
+
+### Manual check: does a 10 000-block teleport still work?
+
+Unit tests cover the classifier; this checks the whole thing on a running server, and it is worth
+doing after any change to the chunk code.
+
+1. In `config/tickpilot.toml`, set the worst case you can:
+
+   ```toml
+   target_mspt = 0.1          # forces the load level to CRITICAL, so the cap really applies
+   critical_mspt = 0.2
+   enable_chunk_budget = true
+   max_chunk_operations_per_tick = 1
+   ```
+
+2. Start the server, join it, and wait about fifteen seconds — for the first ten the load level is
+   pinned at NORMAL by the warm-up and the cap is not applying yet. `/tickpilot status` should say
+   `Load level: CRITICAL` and `Chunk budget: cap 1 per tick`.
+3. Note the time, then teleport far enough that the destination has certainly never been generated:
+
+   ```
+   /tp <player> 10000 200 10000
+   ```
+
+4. The terrain-loading screen should clear in about the same time it takes without the mod, and the
+   world around you should fill in normally. Fly around for a few seconds and look for holes.
+5. Run `/tickpilot status` again and read the class rows. The pass condition is exact:
+   **`held` must be 0 on the first three rows.** Those are the chunks a player was waiting for.
+   Non-zero `held` on rows 4 and 5 is expected and fine — that is the cap doing its job.
+6. Repeat with `/tp <player> -10000 200 -10000`, and again into the Nether
+   (`/execute in minecraft:the_nether run tp <player> 2000 100 2000`) so a portal ticket and a
+   cross-dimension teleport are covered too.
+
+If the loading screen ever hangs, check the server log for `Chunk budget lifted` — that line means
+the emergency release fired, which is the mod telling you it caught itself. Set
+`enable_chunk_budget = false`, run `/tickpilot reload`, and please report it.
 
 ## How tick time is measured, and what that misses
 
