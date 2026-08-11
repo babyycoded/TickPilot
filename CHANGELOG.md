@@ -95,6 +95,13 @@ source keeps the promise visible. If you are adding a phase, add its deferrals *
   a world reference, so neither was an INV-7 violation in substance — both are now cleared on
   `SERVER_STOPPING`/`SERVER_STOPPED` anyway, and the clearing method lists them so the audit stays
   honest.
+- **Every Mixin target re-verified against the 1.21.1 mappings**, closing the last "partial" on the
+  §11 checklist. Not a re-read of the Javadoc each phase wrote: the targets were extracted from the
+  sources mechanically and each checked by descriptor with `javap -s` against the named jar. All 11
+  resolve. Two things a name check alone would have missed were checked too — that
+  `saveEverything(ZZZ)Z` really is invoked inside `tickServer`, and exactly once, so the
+  `@At(target = ...)` injection point exists and needs no ordinal; and that the shadowed
+  `BoundTickingBlockEntity.blockEntity` has the descriptor the Mixin declares.
 - **README completed to all thirteen items of SPEC §10**, adding installation, adaptive modes,
   modpack compatibility, limits and conflicts, why arbitrary Minecraft code cannot run
   asynchronously, and how to compare with spark. Checked mechanically: every one of the 24 config
