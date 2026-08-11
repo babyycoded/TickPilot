@@ -50,8 +50,22 @@ final class HudSampler {
 		// Both, deliberately. STOPPING is where the state is released, so a snapshot taken after it
 		// would describe a world being torn down; STOPPED is the belt-and-braces clear that
 		// guarantees nothing from world A can be on screen while world B loads (SPEC AC-19).
-		ServerLifecycleEvents.SERVER_STOPPING.register(server -> HudState.clear());
-		ServerLifecycleEvents.SERVER_STOPPED.register(server -> HudState.clear());
+		ServerLifecycleEvents.SERVER_STOPPING.register(server -> forget());
+		ServerLifecycleEvents.SERVER_STOPPED.register(server -> forget());
+	}
+
+	/**
+	 * Drops everything belonging to the world that is going away (SPEC INV-7, AC-19).
+	 *
+	 * <p>All three of these are static, and the Phase 11 audit is what turned "the snapshot is
+	 * cleared" into "nothing at all survives": the sample counter is only the phase of the timer,
+	 * but a counter carried into the next world is still state carried into the next world, and it
+	 * costs one line to not have it.
+	 */
+	private static void forget() {
+		HudState.clear();
+		HudRenderer.reset();
+		tickCounter = 0;
 	}
 
 	private static void onEndTick(MinecraftServer server) {
