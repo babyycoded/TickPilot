@@ -69,6 +69,15 @@ public final class TickPilotServerState {
 	private volatile TypeLists typeLists = TypeLists.empty();
 
 	private volatile TickPilotConfig config;
+
+	/**
+	 * The mode set with {@code /tickpilot mode}, or {@code null} to follow the config. Runtime
+	 * state belonging to this server and to nothing else: it dies with the server and is cleared by
+	 * {@code reload}, so it can never be the reason a fresh world behaves oddly (SPEC INV-7).
+	 * {@code volatile} for the same reason as {@link #config} — the command thread writes it while
+	 * the tick loop reads it.
+	 */
+	private volatile AdaptiveMode modeOverride;
 	private volatile TickBudget budget;
 
 	private volatile boolean disabled;
@@ -94,7 +103,7 @@ public final class TickPilotServerState {
 
 		this.scheduler = new AdaptiveScheduler<>(config.maxDeferredTasks(), System::nanoTime,
 				schedulerEvents());
-		this.scheduler.setDeferralEnabled(deferralAllowed(config));
+		this.scheduler.setDeferralEnabled(deferralAllowed());
 		this.zones = new ZoneTracker(config.fullRadius(), config.reducedRadius());
 	}
 
@@ -124,7 +133,85 @@ public final class TickPilotServerState {
 	public boolean chunkBudgetEnabled() {
 		TickPilotConfig snapshot = this.config;
 		return snapshot.enableChunkBudget() && snapshot.enableAdaptiveMode()
-				&& snapshot.effectiveMode() != AdaptiveMode.STRICT;
+				&& effectiveMode() != AdaptiveMode.STRICT;
+	}
+
+	/**
+	 * The mode actually in force on this server right now (SPEC FR-11, AC-11).
+	 *
+	 * <p>Three inputs, in this order of authority:
+	 * <ol>
+	 *   <li>{@code safe_compatibility_mode = true} in the config forces STRICT and cannot be
+	 *       overridden by anything. It is the operator saying "this server does not run
+	 *       experiments", and a chat command that could defeat it would make the config file a
+	 *       lie;</li>
+	 *   <li>a mode set with {@code /tickpilot mode}, which lasts until the server stops or the
+	 *       config is reloaded;</li>
+	 *   <li>{@code default_mode} from the config.</li>
+	 * </ol>
+	 *
+	 * <p>This, not {@link TickPilotConfig#effectiveMode()}, is what every consumer asks: the config
+	 * cannot see the runtime override, so a caller reading the config directly would act on a mode
+	 * the operator has already changed.
+	 *
+	 * @return the mode every policy must obey
+	 */
+	public AdaptiveMode effectiveMode() {
+		TickPilotConfig snapshot = this.config;
+
+		if (snapshot.safeCompatibilityMode()) {
+			return AdaptiveMode.STRICT;
+		}
+
+		AdaptiveMode override = this.modeOverride;
+		return override != null ? override : snapshot.defaultMode();
+	}
+
+	/** @return whether the mode in force came from a command rather than from the config */
+	public boolean isModeOverridden() {
+		return modeOverride != null;
+	}
+
+	/** What {@link #setMode(AdaptiveMode)} did, so the caller can say so precisely. */
+	public enum ModeChange {
+		/** The mode changed and every policy is already acting on the new one. */
+		APPLIED,
+		/** The server was already in that mode; nothing was touched. */
+		UNCHANGED,
+		/** Refused: {@code safe_compatibility_mode} pins this server to STRICT. */
+		FORCED_STRICT
+	}
+
+	/**
+	 * Changes the mode at runtime (SPEC FR-12 {@code /tickpilot mode}, AC-11).
+	 *
+	 * <p>Applies on the spot rather than at the next restart, which is what AC-11 asks for: the
+	 * scheduler is told immediately whether it may still defer, and the diagnostic tallies are
+	 * cleared for the same reason {@code reload} clears them — they describe decisions taken under
+	 * one set of rules, and averaging two sets into one number is the mistake the profiler avoids
+	 * by clearing itself between sessions.
+	 *
+	 * <p>Setting the mode the config already asks for clears the override rather than pinning it,
+	 * so "put it back" leaves a clean state instead of one that merely happens to agree.
+	 *
+	 * @param mode the mode to switch to
+	 * @return what happened; the caller turns it into a message rather than an exception (AC-12)
+	 */
+	public ModeChange setMode(AdaptiveMode mode) {
+		if (config.safeCompatibilityMode()) {
+			return ModeChange.FORCED_STRICT;
+		}
+
+		if (effectiveMode() == mode) {
+			return ModeChange.UNCHANGED;
+		}
+
+		this.modeOverride = mode == config.defaultMode() ? null : mode;
+
+		scheduler.setDeferralEnabled(deferralAllowed());
+		policyDiagnostics.reset();
+		chunkBudget.reset();
+		return ModeChange.APPLIED;
 	}
 
 	/**
@@ -166,8 +253,8 @@ public final class TickPilotServerState {
 	 * adaptive mode off, or in STRICT, every submission runs immediately, which is exactly what
 	 * would happen with TickPilot absent.
 	 */
-	private static boolean deferralAllowed(TickPilotConfig config) {
-		return config.enableAdaptiveMode() && config.effectiveMode() != AdaptiveMode.STRICT;
+	private boolean deferralAllowed() {
+		return config.enableAdaptiveMode() && effectiveMode() != AdaptiveMode.STRICT;
 	}
 
 	/**
@@ -370,9 +457,14 @@ public final class TickPilotServerState {
 
 		this.config = config;
 
+		// A reload makes the file the source of truth again. Keeping a mode somebody set with
+		// /tickpilot mode would mean an operator editing default_mode, running reload, and watching
+		// nothing happen — the file would be describing a server it no longer governs (AC-11).
+		this.modeOverride = null;
+
 		// Both apply on the spot rather than at the next restart: an operator lowering the cap or
 		// switching to STRICT is asking for it to hold now (SPEC AC-15, FR-11).
-		scheduler.setDeferralEnabled(deferralAllowed(config));
+		scheduler.setDeferralEnabled(deferralAllowed());
 		zones.setRadii(config.fullRadius(), config.reducedRadius());
 		// The tally describes decisions taken under one configuration. Carrying it across a reload
 		// would average two different sets of rules into one number, which is the same mistake the

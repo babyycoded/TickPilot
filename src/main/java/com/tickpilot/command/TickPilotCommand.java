@@ -9,11 +9,13 @@ import java.util.concurrent.TimeUnit;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.tickpilot.ServerStateHolder;
 import com.tickpilot.TickPilot;
 import com.tickpilot.TickPilotServerState;
 import com.tickpilot.budget.LoadLevel;
 import com.tickpilot.budget.TickBudget;
+import com.tickpilot.config.AdaptiveMode;
 import com.tickpilot.config.ConfigLoadResult;
 import com.tickpilot.config.ConfigLoader;
 import com.tickpilot.metrics.OverheadMeter;
@@ -77,6 +79,30 @@ public final class TickPilotCommand {
 				(dispatcher, registryAccess, environment) -> register(dispatcher));
 	}
 
+	/**
+	 * Builds {@code /tickpilot mode} (SPEC FR-12, AC-11).
+	 *
+	 * <p>One literal per {@link AdaptiveMode} constant, generated from the enum rather than written
+	 * out three times, so a mode added later cannot be forgotten here. Literals and not a string
+	 * argument: they give tab completion for free and Brigadier rejects anything else with its own
+	 * message, which is AC-12's "an understandable error, not an exception" without writing one.
+	 *
+	 * <p>Bare {@code /tickpilot mode} reports rather than changing anything, because the commonest
+	 * reason to type it is to find out what the server is doing.
+	 */
+	private static LiteralArgumentBuilder<CommandSourceStack> modeCommand() {
+		LiteralArgumentBuilder<CommandSourceStack> mode = Commands.literal("mode")
+				.requires(source -> source.hasPermission(2))
+				.executes(context -> modeShow(context.getSource()));
+
+		for (AdaptiveMode value : AdaptiveMode.values()) {
+			mode = mode.then(Commands.literal(value.name().toLowerCase(Locale.ROOT))
+					.executes(context -> modeSet(context.getSource(), value)));
+		}
+
+		return mode;
+	}
+
 	private static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
 		// SPEC FR-12 gives `status` permission level 0, i.e. available to everyone, so no
 		// `requires` clause. Making the level configurable needs a config key that FR-15 does not
@@ -90,6 +116,7 @@ public final class TickPilotCommand {
 				.then(Commands.literal("explain")
 						.requires(source -> source.hasPermission(2))
 						.executes(context -> explain(context.getSource())))
+				.then(modeCommand())
 				.then(Commands.literal("top")
 						.requires(source -> source.hasPermission(2))
 						.executes(context -> top(context.getSource()))
@@ -108,6 +135,98 @@ public final class TickPilotCommand {
 						.then(Commands.argument("seconds", IntegerArgumentType.integer(1, 300))
 								.executes(context -> profileStart(context.getSource(),
 										IntegerArgumentType.getInteger(context, "seconds"))))));
+	}
+
+	/** Reports the mode in force and where it came from (SPEC FR-12). */
+	private static int modeShow(CommandSourceStack source) {
+		// INV-9: a command must report a problem, never throw into the command dispatcher.
+		try {
+			TickPilotServerState state = ServerStateHolder.get(source.getServer());
+
+			if (state == null || state.isDisabled()) {
+				source.sendFailure(Component.translatable("command.tickpilot.status.unavailable"));
+				return 0;
+			}
+
+			sendModeLines(source, state);
+			return 1;
+		} catch (Throwable t) {
+			TickPilot.LOGGER.error("/tickpilot mode failed", t);
+			source.sendFailure(Component.translatable("command.tickpilot.error"));
+			return 0;
+		}
+	}
+
+	/**
+	 * Changes the mode (SPEC AC-11: by command as well as by config, applied without a restart).
+	 *
+	 * <p>A refusal is a message, not a failure of the command, in one case only: with
+	 * {@code safe_compatibility_mode = true} the server is pinned to STRICT by its own config, and
+	 * saying so is more use than silently doing nothing.
+	 */
+	private static int modeSet(CommandSourceStack source, AdaptiveMode mode) {
+		try {
+			TickPilotServerState state = ServerStateHolder.get(source.getServer());
+
+			if (state == null || state.isDisabled()) {
+				source.sendFailure(Component.translatable("command.tickpilot.status.unavailable"));
+				return 0;
+			}
+
+			TickPilotServerState.ModeChange change = state.setMode(mode);
+
+			switch (change) {
+				case FORCED_STRICT -> {
+					source.sendFailure(Component.translatable("command.tickpilot.mode.forced",
+							Component.translatable(AdaptiveMode.STRICT.translationKey())));
+					return 0;
+				}
+				case UNCHANGED -> source.sendSuccess(
+						() -> Component.translatable("command.tickpilot.mode.unchanged",
+								Component.translatable(mode.translationKey())), false);
+				case APPLIED -> {
+					// Broadcast: a mode change alters what the server does to everybody's content,
+					// so it belongs in the log and in other operators' chat, unlike a status readout.
+					source.sendSuccess(() -> Component.translatable("command.tickpilot.mode.set",
+							Component.translatable(mode.translationKey())), true);
+					TickPilot.LOGGER.info("Adaptive mode set to {} by {}", mode.configValue(),
+							source.getTextName());
+				}
+			}
+
+			sendModeLines(source, state);
+			return 1;
+		} catch (Throwable t) {
+			TickPilot.LOGGER.error("/tickpilot mode failed", t);
+			source.sendFailure(Component.translatable("command.tickpilot.error"));
+			return 0;
+		}
+	}
+
+	/**
+	 * The two lines that describe the mode: what is in force, and why it is not what the config
+	 * file says when those differ. Shared by {@code mode} and {@code mode &lt;value&gt;} so the two
+	 * cannot describe the same state differently.
+	 */
+	private static void sendModeLines(CommandSourceStack source, TickPilotServerState state) {
+		AdaptiveMode effective = state.effectiveMode();
+
+		source.sendSuccess(() -> Component.translatable("command.tickpilot.mode.current",
+				Component.translatable(effective.translationKey())), false);
+
+		if (state.config().safeCompatibilityMode()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.mode.from_safe_mode")
+					.withStyle(ChatFormatting.GRAY), false);
+		} else if (state.isModeOverridden()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.mode.from_command",
+					Component.translatable(state.config().defaultMode().translationKey()))
+					.withStyle(ChatFormatting.GRAY), false);
+		}
+
+		if (!state.config().enableAdaptiveMode()) {
+			source.sendSuccess(() -> Component.translatable("command.tickpilot.mode.adaptive_off")
+					.withStyle(ChatFormatting.YELLOW), false);
+		}
 	}
 
 	private static int profileStart(CommandSourceStack source, int seconds) {
@@ -620,7 +739,7 @@ public final class TickPilotCommand {
 
 		source.sendSuccess(() -> Component.translatable("command.tickpilot.explain.load",
 				Component.translatable(level.translationKey()).withStyle(levelColour(level)),
-				Component.translatable(state.config().effectiveMode().translationKey()),
+				Component.translatable(state.effectiveMode().translationKey()),
 				Component.translatable(state.config().enableAdaptiveMode()
 						? "tickpilot.value.enabled" : "tickpilot.value.disabled")), false);
 

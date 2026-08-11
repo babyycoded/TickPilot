@@ -92,7 +92,7 @@ final class TickPilotTickListener {
 		state.policyDiagnostics().onTick();
 
 		PolicyHook.attach(state.policyDiagnostics(), zones, state.typeLists(),
-				state.config().effectiveMode(), state.loadLevel(),
+				state.effectiveMode(), state.loadLevel(),
 				state.config().enableAdaptiveMode(),
 				state.config().minEntityUpdateIntervalTicks());
 	}
@@ -127,7 +127,7 @@ final class TickPilotTickListener {
 		tracker.beginTick(server);
 
 		budget.configure(true,
-				TickPolicy.intervenesAt(state.config().effectiveMode(), state.loadLevel()),
+				TickPolicy.intervenesAt(state.effectiveMode(), state.loadLevel()),
 				state.config().maxChunkOperationsPerTick());
 		budget.beginTick(tracker.tick());
 	}

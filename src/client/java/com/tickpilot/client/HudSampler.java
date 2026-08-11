@@ -108,7 +108,9 @@ final class HudSampler {
 				metrics.lastMspt(),
 				metrics.averageMspt5s(nowNanos),
 				state.loadLevel(),
-				config.effectiveMode(),
+				// The state's mode, not the config's: /tickpilot mode can change it at runtime and
+				// the config snapshot cannot see that (SPEC AC-11).
+				state.effectiveMode(),
 				config.enableAdaptiveMode(),
 				state.scheduler().stats().queued(),
 				dominant,
