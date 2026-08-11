@@ -5,6 +5,102 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
 
 ## Unreleased
 
+## Not implemented in v1.0
+
+The per-phase sections below each end with what that phase left undone, but most of those items
+were picked up by a later phase. This is the list that is still true — the one to read if you are
+deciding whether TickPilot does what you need. Every entry was re-checked against the source while
+writing it, not carried over from an earlier list.
+
+**Features that are diagnostics only**
+
+- **Block entity throttling (FR-9).** Never implemented; `BlockEntityPolicy` counts and reports,
+  nothing is skipped. Seven candidate types were read and all rejected: five keep their state in
+  the ticker itself (`cookingProgress++`, `spawnDelay--`, `brewTime--`), so a skipped tick loses
+  work instead of delaying it; `beacon` and `conduit` are gated on absolute game time, so a skip
+  that lands on the gate loses the effect entirely; `chest` has no server ticker at all. §13 #18.
+- **Registered `ThrottlePolicy` objects are consulted by nothing.** `TickPilotApi.registerPolicy`
+  accepts and stores them, and `registerPolicy` logs that it does nothing yet, but no decision path
+  reads them. A mod that registers one has not protected anything — use `throttle_denylist`.
+- **`TaskProfile.asyncComputeAllowed` is stored and never read.** It is a declaration for a
+  scheduler that does not exist. Nothing in TickPilot runs anything off the server thread.
+- **The chunk budget caps nothing on a vanilla server.** Not a bug and not a stub: every vanilla
+  chunk ticket type is player-critical by construction, so there is genuinely no optional chunk work
+  to cap unless another mod is loading chunks. §13 #19.
+
+**Data that is not collected**
+
+- **No coordinates anywhere.** AC-3 asks for a bounded per-position buffer during a profiling
+  session so `explain` can say *where* the expensive block entities are. Only per-type aggregation
+  exists, so the advice is "this type is expensive", never "at these coordinates". §13 #14.
+- **`SCHEDULED_TICKS` has no per-type attribution**, so its recommendation names a direction to look
+  in rather than a culprit. Adding one needs a hook per scheduled tick, whose cost was judged not
+  worth it in Phase 5.
+- **Chunk sending to players lands in `OTHER`.** Deliberate, and documented in the README.
+- **The MSPT underestimate is not quantified.** Measurement spans the body of the tick, not the few
+  statements around it (§13 #8). The delta is constant and changes no conclusion, but nobody has
+  measured it on a loaded server, so no number is printed.
+
+**Interfaces that are narrower than the SPEC text**
+
+- **`/tickpilot status` permission level is hard-wired to 0.** FR-12 says operator-settable; FR-15
+  defines no key for it, and inventing one was judged worse than the limitation.
+- **No off-thread submission path.** `TickPilotApi.submit` from another thread returns
+  `WRONG_THREAD` and refuses, rather than queueing. §13 #16.
+- **The client HUD is singleplayer only**, and no network protocol was added to change that.
+- **The config parser is a documented subset of TOML.** §13 #10.
+
+**Testing gaps**
+
+- **No unit tests for client code.** `src/test` does not see the `client` source set, and adding a
+  client test source set was judged not worth the build change for code whose real failure modes
+  (main menu, world switch, F3) are only observable live. Verified by probe instead — see Phase 10.
+- **The chunk budget's holding branch has never run on a live server**, because a vanilla server
+  cannot produce work of the class it holds. Unit-tested only.
+- **No load test beyond a single machine.** Every live run in this project is one server, one
+  client, one box.
+
+**Found in Phase 11: a deferral that was lost between sessions**
+
+`/tickpilot mode` is now implemented, and it should not have taken this long. Phase 6 recorded it as
+deferred "to Phase 8, with the policies it controls". Phase 8 came and went, the policies landed,
+and the command did not — the note stayed in an old per-phase section that nobody re-read, and no
+later phase carried it forward. It was caught only because Phase 11 walked the FR-12 command table
+against the registered subcommands instead of trusting the phase history.
+
+That is the failure mode this consolidated list exists to prevent: a per-phase "deferred" note is
+written once and then ages out of sight, while a single list that has to be re-derived from the
+source keeps the promise visible. If you are adding a phase, add its deferrals **here** as well.
+
+### Phase 11 — documentation, audits and the mode command (FR-12, AC-11, FR-18, INV-7)
+
+- **`/tickpilot mode <strict|balanced|aggressive>`** implemented, closing the FR-12 command table
+  and the "by command as well as by config" half of AC-11. The mode lives in `TickPilotServerState`
+  as a runtime override, applies from the tick it is set, and is dropped by `/tickpilot reload` so
+  the file goes back to being the source of truth. Setting the mode the config already asks for
+  clears the override rather than pinning it.
+  - `safe_compatibility_mode = true` **cannot** be overridden by the command. It is the operator
+    saying "this server runs no experiments", and a chat command that could defeat it would make
+    the config file a lie. The command refuses with an explanation instead of silently doing
+    nothing — FR-12 does not cover this case, so it is a judgement, recorded here as one.
+  - Six existing consumers moved from `config().effectiveMode()` to `state.effectiveMode()`; a
+    config snapshot cannot see a runtime override, so any of them left behind would have acted on
+    a mode the operator had already changed.
+  - Verified live: all four branches (report, set, set-again, refusal under
+    `safe_compatibility_mode`) driven through a real server console. 7 new unit tests.
+- **INV-7 audit, field by field.** Every non-final `static` field in `src/main` and `src/client` was
+  listed and justified individually rather than by a blanket claim. It found two client fields that
+  outlived the world that produced them: `HudRenderer.failed`, which meant a HUD that failed once in
+  world A stayed off in world B until the game restarted, and `HudSampler.tickCounter`. Neither held
+  a world reference, so neither was an INV-7 violation in substance — both are now cleared on
+  `SERVER_STOPPING`/`SERVER_STOPPED` anyway, and the clearing method lists them so the audit stays
+  honest.
+- **README completed to all thirteen items of SPEC §10**, adding installation, adaptive modes,
+  modpack compatibility, limits and conflicts, why arbitrary Minecraft code cannot run
+  asynchronously, and how to compare with spark. Checked mechanically: every one of the 24 config
+  keys appears in the settings table, and every internal link resolves to a heading that exists.
+- **`TickProfiler.dominantCategory()`** and the consolidated not-implemented list above.
+
 ### Phase 10 — client HUD (FR-20, FR-18, AC-19)
 
 An optional top-left readout of TPS, MSPT, mode, load level, deferred tasks and the main load

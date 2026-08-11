@@ -2,16 +2,45 @@
 
 A server-side Fabric performance mod for Minecraft Java Edition 1.21.1 (Java 21).
 
-**Measure first, explain second, throttle cautiously last.** TickPilot makes no promises about
-magically raising your TPS.
+**What it actually does:** it measures where your server's tick time goes, explains it in plain
+language, and — only if you switch something on and say what it may touch — holds back a narrow
+slice of optional work. It is a measuring instrument first. If you install it and change nothing,
+it changes nothing.
 
-On a default install it still only measures and reports: nothing in the game is throttled or
-changed. Two things can change behaviour, and both are off until you switch them on and say what
-they may touch — mob AI thinning, which needs types on `throttle_allowlist` and an interval above
-1, and the [chunk budget](#chunk-budget), which needs `enable_chunk_budget = true`.
+**What it does not do:** it will not raise your TPS on its own, it does not rewrite the tick loop,
+and it does not run game logic on other threads. See [Why not just make it multithreaded?](#why-not-just-make-it-multithreaded)
+and [Limits and known conflicts](#limits-and-known-conflicts) before expecting otherwise.
 
-> This README is a work in progress and grows with each development phase. The full document
-> required by `SPEC.md` §10 lands in Phase 11.
+**Measure first, explain second, throttle cautiously last.** On a default install TickPilot only
+measures and reports. Exactly two things can change behaviour, and each needs you to switch it on
+*and* say what it may touch: mob AI thinning, which needs types on `throttle_allowlist` and
+`min_entity_update_interval_ticks` above 1, and the [chunk budget](#chunk-budget), which needs
+`enable_chunk_budget = true`.
+
+## Installation
+
+Requires [Fabric Loader](https://fabricmc.net/use/installer/) 0.19.3 or newer, Fabric API, and
+Java 21. TickPilot targets Minecraft **1.21.1** only.
+
+### Singleplayer
+
+1. Install Fabric Loader for 1.21.1.
+2. Put `tickpilot-<version>.jar` and Fabric API into `.minecraft/mods`.
+3. Start the game and open any world.
+4. Run `/tickpilot status` and `/tickpilot explain` in chat. `status` needs no permissions; the
+   rest need level 2, which you have in a singleplayer world with cheats on. Without cheats, only
+   `status` is available.
+5. `config/tickpilot.toml` is created inside your world's game directory on first run.
+
+### Dedicated server
+
+1. Put `tickpilot-<version>.jar` and Fabric API into the server's `mods` folder.
+2. Start the server once — `config/tickpilot.toml` is written with commented defaults.
+3. Give yourself operator level 2 (`op <name>` from the console), or run the commands from the
+   server console, which always has full permission.
+4. **No client-side mod is required.** Players do not need TickPilot installed, and nothing is sent
+   to them. The optional [HUD](#client-hud) is the only client-side part, and it only works in
+   singleplayer.
 
 ## TPS and MSPT
 
@@ -44,6 +73,8 @@ mid-tick, which reads as a permanent 19.80 on a perfectly healthy server.
 | `/tickpilot top entities` | level 2 | Costliest entity types, and the mods they belong to |
 | `/tickpilot top blockentities` | level 2 | Costliest block entity types |
 | `/tickpilot explain` | level 2 | All of the above in one plain-language readout, plus one recommendation |
+| `/tickpilot mode` | level 2 | Reports the intervention mode in force and where it came from |
+| `/tickpilot mode <strict\|balanced\|aggressive>` | level 2 | Changes it, from this tick, without a restart |
 
 Example output:
 
@@ -54,6 +85,29 @@ MSPT: last 8.41, avg 5s 9.02, 1m 8.77, 5m 8.61
 MSPT: p95 14.30, p99 22.85 (last 1m)
 MSPT: max 61.20, 3m 12s ago; p95 15.02, p99 40.11 (history: 5m 00s)
 Load level: NORMAL (target 40.00 / high 45.00 / critical 50.00 ms)
+```
+
+`/tickpilot mode` says what is in force and, when they differ, why that is not what the config file
+says:
+
+```
+> /tickpilot mode
+Adaptive mode: BALANCED
+
+> /tickpilot mode aggressive
+Adaptive mode set to AGGRESSIVE; it applies from this tick and lasts until the server stops or the config is reloaded
+Adaptive mode: AGGRESSIVE
+  set by command; the config says BALANCED, and /tickpilot reload puts it back
+
+> /tickpilot mode aggressive
+Adaptive mode is already AGGRESSIVE; nothing changed
+```
+
+With `safe_compatibility_mode = true` the command refuses rather than silently doing nothing:
+
+```
+> /tickpilot mode aggressive
+safe_compatibility_mode = true pins this server to STRICT. Change it in the config and run /tickpilot reload if you really want to intervene
 ```
 
 ### Reading the two percentile lines
@@ -181,8 +235,41 @@ is printed with its age on its own line and does not need to become a diagnosis.
 ## Configuration
 
 `config/tickpilot.toml` is created with commented defaults the first time the server starts, and
-`/tickpilot reload` applies changes without a restart. Every setting and its default is listed in
-the generated file itself, so the file is the reference rather than this section.
+`/tickpilot reload` applies changes without a restart.
+
+### Every setting
+
+| Key | Default | What it means |
+|---|---|---|
+| `target_mspt` | `40.0` | Milliseconds per tick above which the load level leaves NORMAL. The budget you are aiming to stay inside, not the point at which you lag. |
+| `critical_mspt` | `50.0` | Where the load level becomes CRITICAL. 50 ms is one tick at 20 TPS, so at this point TPS is already falling. Must be above `target_mspt`. |
+| `reserve_mspt` | `10.0` | How much of the tick the scheduler keeps free for the game. Deferred work only runs in `target_mspt - reserve_mspt` minus what the tick already cost. May be 0. |
+| `full_radius` | `32` | Blocks. Inside this distance from any player, nothing is ever thinned. |
+| `reduced_radius` | `96` | Blocks. Beyond this, the most thinning is allowed. Must be above `full_radius`, or the REDUCED zone would be an empty band. |
+| `min_entity_update_interval_ticks` | `1` | Run an allowlisted mob's AI step one tick in N. **`1` means no thinning at all**, which is the default. |
+| `min_block_entity_update_interval_ticks` | `1` | Reserved. Block entity thinning is not implemented — see [Limits](#limits-and-known-conflicts). |
+| `enable_adaptive_mode` | `true` | The master switch for every intervention. `false` makes the mod measurement-only whatever else is set. |
+| `default_mode` | `"BALANCED"` | `STRICT`, `BALANCED` or `AGGRESSIVE` — see [Modes](#adaptive-modes). Changeable at runtime with `/tickpilot mode`. |
+| `max_deferred_tasks` | `10000` | Hard cap on the queue of work other mods submitted through the API. At the cap, work is dropped by priority rather than queued forever. |
+| `enable_chunk_budget` | `false` | Switches on the [chunk budget](#chunk-budget). Off by default because it reorders chunk loading. |
+| `max_chunk_operations_per_tick` | `8` | How many *optional* chunk generation starts are allowed per tick. Ignored unless the key above is `true`. |
+| `profile_buffer_size` | `1200` | How many samples a profiling session keeps. |
+| `log_slow_operations_above_ms` | `2.0` | Threshold for reporting a slow operation. Must be above 0 — 0 would mean logging every tick, which the mod does not do. |
+| `sampling_enabled` | `false` | Start deep profiling from the first tick instead of waiting for `/tickpilot profile`. Costs a little on every tick; leave it off unless you are chasing a start-up problem. |
+| `singleplayer_enabled` | `true` | Whether the mod runs at all on an integrated server. |
+| `client_hud_enabled` | `false` | The optional [HUD](#client-hud). Singleplayer only. |
+| `integrated_server_optimizations` | `true` | Whether interventions apply on an integrated server as well as a dedicated one. |
+| `safe_compatibility_mode` | `false` | `true` forces `STRICT` regardless of `default_mode`, and `/tickpilot mode` cannot override it. Set this if you want a guarantee in writing that the mod touches nothing. |
+
+And the `[lists]` table, all empty by default:
+
+| Key | What it means |
+|---|---|
+| `excluded_entity_ids` | Entity ids TickPilot ignores completely, e.g. `"minecraft:villager"`. |
+| `excluded_block_entity_ids` | Block entity ids to ignore. |
+| `excluded_mod_ids` | Whole namespaces to ignore, e.g. `"create"`. |
+| `throttle_allowlist` | **The only types that may ever be thinned.** Empty means nothing is, which is the default and the point of INV-5. |
+| `throttle_denylist` | Types never touched. Outranks the allowlist. |
 
 ### The rules the loader follows
 
@@ -429,6 +516,136 @@ test on every build, not by review.
 4. Leave to the main menu — nothing is drawn and nothing lingers. Load a different world — the
    numbers start from that world, not from the previous one.
 5. Join a multiplayer server — nothing is drawn, and nothing is logged.
+
+## Adaptive modes
+
+The mode says how far TickPilot may go; the [load level](#load-levels) says how bad things are.
+They are different things and both are shown by `/tickpilot status`.
+
+| Mode | What it does | Acts at load level |
+|---|---|---|
+| `STRICT` | Measures only. No intervention of any kind. This is the compatibility mode — run it if you suspect TickPilot of causing a problem. | never |
+| `BALANCED` | The default. Intervenes only for types you put on `throttle_allowlist`, and only when the server is actually struggling. | HIGH, CRITICAL |
+| `AGGRESSIVE` | Starts intervening one level earlier and thins harder — still only within your allowlist. | ELEVATED, HIGH, CRITICAL |
+
+No mode ever intervenes at NORMAL. A server inside its budget has nothing to gain, and thinning a
+healthy server would be a change nobody asked for.
+
+Set it with `/tickpilot mode <strict|balanced|aggressive>` or with `default_mode` in the config.
+A mode set by command lasts until the server stops or you run `/tickpilot reload`, which puts the
+config back in charge. `safe_compatibility_mode = true` pins the server to STRICT and the command
+will refuse to override it, because a chat command that could defeat that setting would make the
+config file a lie.
+
+## Compatibility with large modpacks
+
+This is the environment TickPilot exists for, so here is the honest picture rather than a
+reassurance.
+
+**What has actually been tested.** Every live check in this project's development ran with
+**Lithium 0.15.4** installed on both server and client. No conflict was observed, on either side,
+across chunk generation, entity ticking, block entity ticking and the client HUD. That is one mod,
+not a modpack.
+
+**Why conflicts are unlikely by construction.** The mod uses eleven Mixins, all of them `@Inject`,
+and **no `@Overwrite` and no `@Redirect`**. That is not a stylistic preference — `@Redirect` is
+exclusive per instruction, so two mods redirecting the same call are hard-incompatible and Mixin
+fails at apply time rather than degrading. Lithium uses `@Redirect` in exactly the methods
+TickPilot needs, for instance in `Level.tickBlockEntities()`. Because TickPilot only injects, the
+two coexist.
+
+**Where a real conflict could still come from**, in rough order of likelihood:
+
+- **Another mod that reorders chunk loading** — a pregenerator, a chunk-loading mod, or another
+  performance mod with its own chunk budget. They will not crash each other, but two schedulers
+  making independent decisions about the same queue is a good way to get behaviour neither author
+  predicted. If you run one, leave `enable_chunk_budget = false`.
+- **A mod that replaces the tick loop wholesale.** TickPilot measures through Fabric's tick events;
+  a mod that bypasses `MinecraftServer.tickServer` would make the measurements describe something
+  other than the real tick.
+- **A mod whose mobs depend on `Mob.serverAiStep` running every tick.** Thinning is opt-in per type
+  through `throttle_allowlist`, so this only bites if you put such a type on the list yourself.
+  When in doubt, do not.
+- **Mixin version skew.** TickPilot uses MixinExtras 0.5.4, which ships inside Fabric Loader; it
+  adds no dependency of its own and bundles nothing.
+
+**If you suspect TickPilot**, the fastest test is `/tickpilot mode strict` — it disables every
+intervention immediately, without a restart, while leaving the measurements running. If the problem
+survives STRICT, it is not TickPilot.
+
+## Limits and known conflicts
+
+- **The chunk budget does nothing on a vanilla server.** See [Chunk budget](#chunk-budget): every
+  vanilla chunk ticket type is player-critical by construction, so there is nothing optional to cap
+  unless another mod is loading chunks.
+- **Block entity throttling is not implemented at all.** Only diagnostics. The types worth thinning
+  turned out to keep their state in the ticker itself (`cookingProgress++`, `spawnDelay--`), so a
+  skipped tick loses work rather than delaying it. `CHANGELOG.md` lists the seven types examined.
+- **The main cost breakdown needs a profiling session.** Outside `/tickpilot profile`, `explain`
+  and the HUD say `n/a` rather than inventing a number from categories that read zero.
+- **No coordinates in recommendations.** `explain` can tell you *which type* is expensive, not
+  *where* it is. That needs a bounded per-position buffer that has not been built.
+- **MSPT reads slightly low** against vanilla's own tick timer — see
+  [How tick time is measured](#how-tick-time-is-measured-and-what-that-misses).
+- **The client HUD is singleplayer-only**, and TickPilot adds no network protocol to change that.
+- **The config parser is a TOML subset.** See [The supported TOML subset](#the-supported-toml-subset).
+
+## Why not just make it multithreaded?
+
+This is the single most common idea for "making a server faster", and it is the one thing this mod
+will not do. It is worth being concrete about why.
+
+Minecraft's server is single-threaded by design, and almost nothing in it is written to be
+thread-safe. `Level`, `ServerLevel`, `Entity`, `BlockEntity`, `LevelChunk`, the registries and the
+game's collections all assume exactly one thread touches them. Moving a piece of that work onto
+another thread does not merely risk a rare crash — it produces silent corruption:
+
+- entity lists and chunk maps are plain collections; concurrent mutation gives you a lost entity,
+  a duplicated one, or a `ConcurrentModificationException` in an unrelated system three ticks later;
+- block updates are ordered. Two threads applying updates to neighbouring blocks can produce a
+  state that no sequence of single-threaded ticks could ever produce, and that state then gets saved;
+- much of the game reads a value, decides, and writes it back with no locking anywhere between;
+- the damage is usually *written to disk* before anybody notices, so "it worked on my server for a
+  week" is not evidence of safety.
+
+Mods that genuinely parallelise Minecraft do it by rewriting specific subsystems whose data
+dependencies have been analysed — chunk generation, lighting, pathfinding — not by moving arbitrary
+code off the main thread. That is a different and much larger project.
+
+So TickPilot's rule (`INV-1`) is absolute: **no `Level`, `Entity`, `BlockEntity`, `LevelChunk`,
+`MinecraftServer`, registry or game collection is touched from any thread but the server thread.**
+Background threads may only do pure arithmetic on copied primitives. Every measurement in this mod
+is built that way: the tick hooks record `long`s, and anything that needs to look at the world does
+it on the server thread or not at all. The public API enforces the same rule on other mods —
+`TickPilotApi.submit` called from the wrong thread returns `WRONG_THREAD` and refuses to run or
+queue the work, rather than "helpfully" executing it somewhere unsafe.
+
+## Comparing with spark
+
+[spark](https://spark.lucko.me/) is the profiler most operators already know, and the two answer
+different questions. If you have both, use them together:
+
+| | spark | TickPilot |
+|---|---|---|
+| Method | JVM sampling profiler — where the *call stack* spends time | instrumentation at named tick phases — where the *tick* spends time |
+| Best at | finding a specific hot method, including inside a mod's own code | attributing cost to entity and block entity **types**, and to mod IDs |
+| Output | a call tree you read in a browser | numbers in chat, with a recommendation |
+| Overhead | low, but sampling | ~0.01–0.02 ms/tick, measured and reported by `/tickpilot status` |
+
+To compare them on the same load, run both over the same window:
+
+```
+/spark profiler start --timeout 60
+/tickpilot profile 60
+```
+
+The two should agree on the *shape* of the problem — if spark says the tree is dominated by
+`ServerLevel.tickNonPassenger` and TickPilot says `ENTITIES` is 70 % of the tick, that is the same
+finding in two vocabularies. If they disagree, trust spark on *where in the code* and TickPilot on
+*which content*, and please report the disagreement.
+
+For a vanilla cross-check with no mods at all, `/tick query` prints the server's own average and
+percentiles. TickPilot's numbers read slightly lower than vanilla's for the reason described below.
 
 ## How tick time is measured, and what that misses
 
