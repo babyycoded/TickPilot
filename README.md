@@ -844,6 +844,22 @@ by the test, and the config tests run against a temporary directory. The schedul
 its task id type for the same reason — the mod keys it by `ResourceLocation`, the tests by `String`,
 so priority order, deadlines and queue overflow are all exercised without the game.
 
+### Running the game from the repo
+
+```bash
+./gradlew runServer   # dedicated server, game directory: run/
+./gradlew runClient   # client,            game directory: run/runclient/
+```
+
+**The two have separate game directories, and therefore two separate configs.** `runClient` was
+moved to `run/runclient/` so that both can be up at once — sharing one directory makes them fight
+over `run/.fabric/processedMods` and the second to start dies during mod remapping. The cost of that
+is a trap worth naming, because it has already cost someone an evening: editing
+`run/config/tickpilot.toml` changes nothing about a **client** you then launch. For anything you
+want to see in singleplayer or on the HUD, edit `run/runclient/config/tickpilot.toml`.
+
+None of this affects an installed mod. A normal client has one game directory and one config.
+
 ## Licence
 
 MIT. See `LICENSE`.

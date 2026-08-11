@@ -74,6 +74,18 @@ source keeps the promise visible. If you are adding a phase, add its deferrals *
 
 ### Phase 11 — documentation, audits and the mode command (FR-12, AC-11, FR-18, INV-7)
 
+- **The manual checks were run and passed**, by a person at a keyboard rather than from the agent
+  session, which has no way to type into the game. Confirmed: `/tickpilot status`, `explain` and
+  `reload` inside a singleplayer world; the HUD drawing live numbers and hiding correctly under F1
+  and F3; **a world switch producing a fresh HUD with no state inherited from the previous world**,
+  which is the one thing the Phase 10 probes could not reach; and chunk generation after a long
+  teleport being visually indistinguishable from vanilla. §11 item 4 closed on that report.
+- **A trap in the repo's own dev setup, found by that run and now documented.** `runClient` and
+  `runServer` have had separate game directories since Phase 9, so `run/config/tickpilot.toml` and
+  `run/runclient/config/tickpilot.toml` are two different files. Editing the first and launching a
+  client changes nothing, and nothing says so. Not a bug in the mod — an installed client has one
+  game directory — but it cost real time, so `README.md` now names it under Building and testing.
+
 - **`/tickpilot mode <strict|balanced|aggressive>`** implemented, closing the FR-12 command table
   and the "by command as well as by config" half of AC-11. The mode lives in `TickPilotServerState`
   as a runtime override, applies from the tick it is set, and is dropped by `/tickpilot reload` so
