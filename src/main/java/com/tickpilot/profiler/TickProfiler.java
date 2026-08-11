@@ -269,6 +269,50 @@ public final class TickProfiler {
 		return sessionTicks;
 	}
 
+	/**
+	 * The costliest category measured this session — what {@code /tickpilot explain} calls the main
+	 * cost and what the client HUD calls the main load source (SPEC AC-13, FR-20).
+	 *
+	 * <p>Two categories are excluded, for opposite reasons. {@link TickCategory#TOTAL} is the whole
+	 * tick rather than a part of it, so it would always win and say nothing. A category with no
+	 * working hook behind it is excluded so that it cannot win by being zero — SPEC AC-2 says an
+	 * unmeasured category is {@code n/a}, not free. {@link TickCategory#OTHER} is kept even though
+	 * it has no hook, because it is derived from TOTAL minus everything measured and is therefore
+	 * always meaningful; "most of the tick is in something TickPilot cannot see" is a real answer.
+	 *
+	 * <p>Lives here rather than in the command so that the HUD and {@code explain} cannot drift into
+	 * two copies of the rule.
+	 *
+	 * @return the costliest category, or {@code null} when no session has folded in a tick yet
+	 */
+	public TickCategory dominantCategory() {
+		if (sessionTicks == 0L) {
+			return null;
+		}
+
+		TickCategory dominant = null;
+		long dominantNanos = -1L;
+
+		for (TickCategory category : TickCategory.all()) {
+			if (category == TickCategory.TOTAL) {
+				continue;
+			}
+
+			if (category != TickCategory.OTHER && !isAvailable(category)) {
+				continue;
+			}
+
+			long nanos = sessionNanos(category);
+
+			if (nanos > dominantNanos) {
+				dominantNanos = nanos;
+				dominant = category;
+			}
+		}
+
+		return dominant;
+	}
+
 	/** @return frames dropped because the stack was full; non-zero means MAX_DEPTH is too small */
 	public long droppedFrames() {
 		return droppedFrames;

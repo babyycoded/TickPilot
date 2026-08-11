@@ -653,10 +653,8 @@ public final class TickPilotCommand {
 	/**
 	 * Flattens what the profiler knows into the input {@link ExplainAdvisor} reads.
 	 *
-	 * <p>The dominant category is picked over the categories that have a working hook, plus OTHER,
-	 * which is derived from TOTAL and therefore always meaningful. A category that was never
-	 * measured cannot win by being zero, and TOTAL is excluded because it is the whole tick rather
-	 * than a part of it.
+	 * <p>Which category counts as dominant is {@link TickProfiler#dominantCategory()}, shared with
+	 * the client HUD so the two cannot drift apart.
 	 */
 	private static ExplainAdvisor.Profile buildProfile(TickPilotServerState state) {
 		TickProfiler profiler = state.profiler();
@@ -666,28 +664,12 @@ public final class TickPilotCommand {
 			return ExplainAdvisor.Profile.none();
 		}
 
-		TickCategory dominant = null;
-		long dominantNanos = -1L;
-
-		for (TickCategory category : TickCategory.all()) {
-			if (category == TickCategory.TOTAL) {
-				continue;
-			}
-
-			if (category != TickCategory.OTHER && !profiler.isAvailable(category)) {
-				continue;
-			}
-
-			long nanos = profiler.sessionNanos(category);
-
-			if (nanos > dominantNanos) {
-				dominantNanos = nanos;
-				dominant = category;
-			}
-		}
+		TickCategory dominant = profiler.dominantCategory();
 
 		double totalMspt = toMsptPerTick(profiler.sessionNanos(TickCategory.TOTAL), ticks);
-		double dominantMspt = toMsptPerTick(Math.max(0L, dominantNanos), ticks);
+		double dominantMspt = dominant == null
+				? 0.0
+				: toMsptPerTick(profiler.sessionNanos(dominant), ticks);
 		double share = totalMspt > 0.0 ? dominantMspt / totalMspt * 100.0 : 0.0;
 
 		String topTypeId = null;

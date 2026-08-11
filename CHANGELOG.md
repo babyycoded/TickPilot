@@ -5,6 +5,57 @@ refer to `SPEC.md`; decisions that deviate from it are logged in `SPEC.md` §13.
 
 ## Unreleased
 
+### Phase 10 — client HUD (FR-20, FR-18, AC-19)
+
+An optional top-left readout of TPS, MSPT, mode, load level, deferred tasks and the main load
+source. Off by default behind `client_hud_enabled`, and confined to `com.tickpilot.client`.
+
+- **No client Mixin.** `HudRenderCallback` exists in fabric-rendering-v1 **5.1.0** — the version
+  this project actually resolves, checked with `./gradlew dependencies` rather than assumed, since
+  the Gradle cache also holds 8.x and 25.x — with the signature
+  `onHudRender(GuiGraphics, DeltaTracker)`, verified by `javap` on the remapped jar. MX-1 satisfied,
+  and `tickpilot.client.mixins.json` stays empty.
+- **The snapshot is built on the integrated server's thread**, once every ten ticks, and published
+  through one `volatile` reference to an immutable record of primitives. The render thread never
+  reads the metrics themselves. Doing it the obvious way — the HUD reaching into
+  `TickPilotServerState` per frame — would mean walking a 6000-entry ring buffer that the server
+  thread is writing, at frame rate rather than tick rate, with a torn `long` read permitted by the
+  memory model. It is also the literal reading of the phase requirement that the data come from the
+  server's state rather than from rendering.
+- The sampler deliberately does not call `TickPilotServerState.snapshot(long)`, which computes
+  percentiles over the whole buffer. That is the right price for a command run a few times a
+  session and the wrong one for something on a timer.
+- **`TickProfiler.dominantCategory()`** extracted from the private half of `TickPilotCommand`, so
+  the HUD and `/tickpilot explain` cannot drift into two copies of the "which category is the main
+  cost" rule.
+- `SideSeparationTest` scans `src/main/java` and fails on any mention of `net.minecraft.client` or
+  `com.tickpilot.client`, turning FR-18 into a standing check instead of a one-off review.
+
+#### The AC-19 clause Phase 2 deferred is now closed, and how
+
+Phase 2 left the last clause of AC-19 — "when no integrated server exists, the client side does
+nothing and throws nothing" — deliberately unimplemented, on the grounds that a check at
+client-init time would be dead code. It is now implemented where it belongs, in the renderer, and
+verified live in three steps rather than asserted:
+
+1. **A client on a dedicated server** — no integrated server, so the in-game HUD renders every
+   frame with a `null` snapshot. Forty-five seconds in-world: zero HUD failures, zero exceptions.
+2. **A probe proving that was not a vacuous pass.** A one-shot throw inserted at the top of the
+   callback produced exactly one `TickPilot HUD failed` line, which proves the callback is
+   registered and firing every frame — and incidentally proves the AC-16 property that a failing
+   HUD logs once and stops, rather than once per frame. Probe removed, absence re-checked by grep.
+3. **A probe proving the opposite branch.** In singleplayer, a throw placed *after* the null check
+   fired with the real published record:
+   `HudSnapshot[tps=20.0, msptLast=11.7032, msptAvg5s=18.218175, loadLevel=NORMAL, mode=BALANCED,
+   adaptiveEnabled=true, deferredQueued=0, dominant=null, ...]`. So the sampler publishes on the
+   server thread, the `volatile` handoff works, and the render thread enters the draw path with
+   real numbers. `dominant=null` is the honest FR-4 case: no profiling session, no main cost.
+
+**Not verified: pixels.** There is no way to read the client's screen from here, so "the readout is
+legible and in the right place" and the F3/F1 toggles remain manual checklist items in `README.md`.
+The same goes for the world-A-to-world-B switch, which needs menu clicks; the clear is wired to
+both `SERVER_STOPPING` and `SERVER_STOPPED`.
+
 ### Phase 9 — chunk budget (FR-10, AC-10, INV-8)
 
 A cap on how much **optional** chunk generation may start per tick, off by default behind the new

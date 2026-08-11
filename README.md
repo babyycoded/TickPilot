@@ -381,6 +381,55 @@ If the loading screen ever hangs, check the server log for `Chunk budget lifted`
 the emergency release fired, which is the mod telling you it caught itself. Set
 `enable_chunk_budget = false`, run `/tickpilot reload`, and please report it.
 
+## Client HUD
+
+Off by default. `client_hud_enabled = true` draws a small readout in the top-left corner:
+
+```
+TickPilot  TPS 20.00  MSPT 11.70 (5s 18.22)
+  mode BALANCED, load NORMAL
+  deferred tasks: 0
+  main cost: n/a - run /tickpilot profile 30 to measure it
+```
+
+It shows what SPEC FR-20 asks for: TPS, MSPT, the intervention mode, the load level, the number of
+deferred tasks, and the main source of load.
+
+**Singleplayer only, and that is not a limitation to be fixed.** The numbers come from the
+integrated server's own state. A client connected to somebody else's server has no integrated
+server, so it has nothing to read and draws nothing — TickPilot sends no packets and adds no
+protocol. If you want these numbers on a remote server, run `/tickpilot status` there.
+
+**The main cost line is usually `n/a`, and honestly so.** Category profiling is a sampling session
+(FR-4), not something that runs all the time, so outside a session there is no measured breakdown
+to show. Run `/tickpilot profile 30` and the line fills in while the session lasts. It is left
+blank rather than filled with the categories that happen to read zero.
+
+The HUD hides itself when the F3 debug screen is up — that corner belongs to vanilla — and when the
+GUI is hidden with F1. `client_hud_enabled` is live: `/tickpilot reload` turns it on and off without
+restarting the game.
+
+### How it stays off the server's back
+
+The snapshot is built **on the integrated server's thread**, once every ten ticks, and handed to
+the renderer through a single `volatile` reference to an immutable record. The render thread never
+touches the metrics themselves. That matters for two reasons: reading a six-thousand-entry ring
+buffer from another thread while the server writes it is a torn read waiting to happen, and doing
+it per frame would make the cost scale with your frame rate instead of the tick rate.
+
+Nothing client-side exists on a dedicated server. All of it lives in `com.tickpilot.client`, which
+Fabric only loads on a client, and no common class is allowed to name it — that is checked by a
+test on every build, not by review.
+
+### Manual check
+
+1. Set `client_hud_enabled = true` in the config of the world you are loading and start the game.
+2. In a singleplayer world the readout appears top-left with live numbers.
+3. Press F3 — it disappears; release F3 — it comes back. Same with F1.
+4. Leave to the main menu — nothing is drawn and nothing lingers. Load a different world — the
+   numbers start from that world, not from the previous one.
+5. Join a multiplayer server — nothing is drawn, and nothing is logged.
+
 ## How tick time is measured, and what that misses
 
 TickPilot measures ticks through the Fabric API events `ServerTickEvents.START_SERVER_TICK` and
